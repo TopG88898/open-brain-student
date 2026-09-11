@@ -1,0 +1,16 @@
+project_id = "mbggfkdzjqmnnmbcdswo"
+
+[functions.telegram-bot]
+verify_jwt = false
+
+[functions.open-brain-mcp]
+verify_jwt = false
+
+[functions.call-llm]
+verify_jwt = true
+
+[functions.enrich-thought]
+verify_jwt = false
+
+[functions.weekly-digest]
+verify_jwt = false
