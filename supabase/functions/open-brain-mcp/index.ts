@@ -25,7 +25,7 @@ function dbHeaders() {
 const TOOLS = [
   {
     name: 'search_thoughts',
-    description: 'Search everything saved in the brain (notes, YouTube transcripts, PDFs, voice captures, Telegram messages) by keyword. Returns up to 10 matches with a truncated content snippet (~500 chars) per match, not the full text.',
+    description: 'Search everything saved in the brain (notes, YouTube transcripts, PDFs, voice captures, Telegram messages) by meaning, not just exact words — e.g. searching "how to get new clients" finds thoughts about "customer acquisition." Returns up to 10 matches with a similarity score and a truncated content snippet (~500 chars) per match, not the full text. Each match also includes up to 3 "linked" thoughts — other ideas the brain has automatically connected to it — so you can surface related context the user may have forgotten.',
     inputSchema: {
       type: 'object',
       properties: { query: { type: 'string', description: 'Keyword or phrase to search for' } },
@@ -53,20 +53,82 @@ const TOOLS = [
 
 const SNIPPET_LENGTH = 500
 
-function truncate(rows: { id: string; content: string; created_at: string }[]) {
+function truncate(rows: { id: string; content: string; created_at: string; similarity?: number }[]) {
   return rows.map((r) => ({
     id: r.id,
     created_at: r.created_at,
+    ...(r.similarity !== undefined ? { similarity: Math.round(r.similarity * 100) / 100 } : {}),
     content: r.content.length > SNIPPET_LENGTH ? r.content.slice(0, SNIPPET_LENGTH) + '…' : r.content,
     truncated: r.content.length > SNIPPET_LENGTH,
   }))
 }
 
+async function generateEmbedding(text: string): Promise<number[] | null> {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/generate-embedding`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ text }),
+  })
+  if (!res.ok) return null
+  const data = await res.json()
+  return data.embedding ?? null
+}
+
+const LINKED_SNIPPET_LENGTH = 200
+
+// For each direct hit, pull its nearest graph neighbors too — so the AI sees
+// not just what matched, but what those matches are connected to.
+async function attachLinkedThoughts(rows: { id: string }[]) {
+  return Promise.all(
+    rows.map(async (row: any) => {
+      const url = `${SUPABASE_URL}/rest/v1/thought_links?or=(source_thought_id.eq.${row.id},target_thought_id.eq.${row.id})&select=source_thought_id,target_thought_id,similarity_score&order=similarity_score.desc&limit=3`
+      const res = await fetch(url, { headers: dbHeaders() })
+      if (!res.ok) return { ...row, linked: [] }
+      const links: { source_thought_id: string; target_thought_id: string; similarity_score: number }[] = await res.json()
+      const neighborIds = links.map((l) => (l.source_thought_id === row.id ? l.target_thought_id : l.source_thought_id))
+      if (!neighborIds.length) return { ...row, linked: [] }
+
+      const neighborsRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/thoughts?id=in.(${neighborIds.join(',')})&select=id,content`,
+        { headers: dbHeaders() }
+      )
+      const neighbors: { id: string; content: string }[] = neighborsRes.ok ? await neighborsRes.json() : []
+      const linked = links.map((l) => {
+        const targetId = l.source_thought_id === row.id ? l.target_thought_id : l.source_thought_id
+        const t = neighbors.find((n) => n.id === targetId)
+        return {
+          id: targetId,
+          similarity: Math.round(l.similarity_score * 100) / 100,
+          content: t ? (t.content.length > LINKED_SNIPPET_LENGTH ? t.content.slice(0, LINKED_SNIPPET_LENGTH) + '…' : t.content) : null,
+        }
+      })
+      return { ...row, linked }
+    })
+  )
+}
+
 async function searchThoughts(query: string) {
-  const url = `${SUPABASE_URL}/rest/v1/thoughts?select=id,content,created_at&content=ilike.*${encodeURIComponent(query)}*&order=created_at.desc&limit=10`
-  const res = await fetch(url, { headers: dbHeaders() })
-  if (!res.ok) throw new Error(`Search failed: ${res.status} ${await res.text()}`)
-  return truncate(await res.json())
+  const embedding = await generateEmbedding(query)
+
+  // Fall back to keyword search if embeddings are unavailable for any reason
+  // (e.g. no OpenRouter credits) — search should degrade, not break.
+  if (!embedding) {
+    const url = `${SUPABASE_URL}/rest/v1/thoughts?select=id,content,created_at&content=ilike.*${encodeURIComponent(query)}*&order=created_at.desc&limit=10`
+    const res = await fetch(url, { headers: dbHeaders() })
+    if (!res.ok) throw new Error(`Search failed: ${res.status} ${await res.text()}`)
+    return attachLinkedThoughts(truncate(await res.json()))
+  }
+
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/search_thoughts`, {
+    method: 'POST',
+    headers: dbHeaders(),
+    body: JSON.stringify({ query_embedding: embedding, match_threshold: 0.3, match_count: 10 }),
+  })
+  if (!res.ok) throw new Error(`Semantic search failed: ${res.status} ${await res.text()}`)
+  return attachLinkedThoughts(truncate(await res.json()))
 }
 
 async function listRecent(limit = 10) {

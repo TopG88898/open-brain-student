@@ -44,13 +44,78 @@ function parseEnrichment(raw: string) {
   return { tags, category, summary }
 }
 
-async function updateThought(id: string, enrichment: { tags: string[]; category: string | null; summary: string | null }) {
+// Best-effort — if this fails, the thought still saves fine without an embedding.
+async function generateEmbedding(text: string): Promise<number[] | null> {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/generate-embedding`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ text }),
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    return data.embedding ?? null
+  } catch (err) {
+    console.error('generate-embedding call failed:', err)
+    return null
+  }
+}
+
+async function updateThought(
+  id: string,
+  fields: { tags: string[]; category: string | null; summary: string | null; embedding: number[] | null }
+) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/thoughts?id=eq.${id}`, {
     method: 'PATCH',
     headers: dbHeaders(),
-    body: JSON.stringify({ ...enrichment, enriched_at: new Date().toISOString() }),
+    body: JSON.stringify({ ...fields, enriched_at: new Date().toISOString() }),
   })
   if (!res.ok) throw new Error(`Update failed: ${res.status} ${await res.text()}`)
+}
+
+// Finds and saves links to this thought's nearest neighbors. Best-effort —
+// if it fails, the thought and its embedding are already saved regardless.
+async function autoLink(thoughtId: string, embedding: number[]): Promise<string> {
+  try {
+    const rpcRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/find_links_for_thought`, {
+      method: 'POST',
+      headers: dbHeaders(),
+      body: JSON.stringify({
+        source_id: thoughtId,
+        source_embedding: embedding,
+        match_threshold: 0.4,
+        match_count: 5,
+      }),
+    })
+    if (!rpcRes.ok) {
+      return `rpc failed: ${rpcRes.status} ${await rpcRes.text()}`
+    }
+    const neighbors: { target_id: string; similarity: number }[] = await rpcRes.json()
+    if (!neighbors.length) return 'rpc returned 0 neighbors'
+
+    const links = neighbors.map((n) => ({
+      source_thought_id: thoughtId,
+      target_thought_id: n.target_id,
+      similarity_score: n.similarity,
+      link_type: 'semantic',
+    }))
+
+    // resolution=ignore-duplicates is the raw-REST equivalent of ignoreDuplicates:true.
+    const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/thought_links`, {
+      method: 'POST',
+      headers: { ...dbHeaders(), Prefer: 'resolution=ignore-duplicates' },
+      body: JSON.stringify(links),
+    })
+    if (!insertRes.ok) {
+      return `insert failed: ${insertRes.status} ${await insertRes.text()}`
+    }
+    return `ok: linked ${links.length}`
+  } catch (err) {
+    return `exception: ${err}`
+  }
 }
 
 Deno.serve(async (req) => {
@@ -74,7 +139,13 @@ ${content.slice(0, 4000)}
 
     const raw = await callLLM(prompt)
     const enrichment = parseEnrichment(raw)
-    await updateThought(id, enrichment)
+    const embedding = await generateEmbedding(content)
+    await updateThought(id, { ...enrichment, embedding })
+
+    if (embedding) {
+      const linkResult = await autoLink(id, embedding)
+      if (!linkResult.startsWith('ok')) console.error('autoLink:', linkResult)
+    }
 
     return new Response('ok', { status: 200 })
   } catch (err) {
