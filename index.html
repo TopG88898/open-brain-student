@@ -8,6 +8,7 @@
   <meta name="theme-color" content="#6366f1">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/force-graph@1/dist/force-graph.min.js"></script>
   <script src="config.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -125,6 +126,31 @@
     .drop-zone.drag { border-color: #6366f1; color: #6366f1; }
     .drop-zone input { display: none; }
 
+    .graph-wrap {
+      position: relative; background: #0a0a0a; border: 1px solid #222; border-radius: 12px;
+      overflow: hidden; height: 560px; margin-bottom: 16px;
+    }
+    .graph-legend {
+      position: absolute; top: 12px; left: 12px; background: rgba(15,15,15,0.85);
+      border: 1px solid #222; border-radius: 8px; padding: 10px 12px; font-size: 0.72rem;
+      color: #999; z-index: 2; backdrop-filter: blur(4px);
+    }
+    .graph-legend .row { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+    .graph-legend .row:first-child { margin-top: 0; }
+    .graph-legend .swatch { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+    .graph-detail {
+      position: absolute; bottom: 0; left: 0; right: 0; max-height: 45%;
+      background: rgba(15,15,15,0.97); border-top: 1px solid #222; padding: 16px 18px;
+      font-size: 0.85rem; color: #ccc; line-height: 1.55; overflow-y: auto; display: none;
+      white-space: pre-wrap; z-index: 2;
+    }
+    .graph-detail .close-detail {
+      position: absolute; top: 12px; right: 14px; background: #1e1e1e; border: none; color: #999;
+      border-radius: 6px; padding: 3px 9px; font-size: 0.75rem; cursor: pointer;
+    }
+    .graph-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: #333; font-size: 0.875rem; }
+    .graph-stats { font-size: 0.75rem; color: #555; margin-bottom: 12px; }
+
     .section-label {
       font-size: 0.7rem; font-weight: 600; color: #444;
       text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 12px;
@@ -158,6 +184,7 @@
     <button class="tab-btn" data-tab="pdf">PDF</button>
     <button class="tab-btn" data-tab="url">URL</button>
     <button class="tab-btn" data-tab="search">Search</button>
+    <button class="tab-btn" data-tab="graph">Graph</button>
   </div>
 
   <!-- TEXT TAB -->
@@ -271,6 +298,16 @@
     <div id="searchResults"></div>
   </div>
 
+  <!-- GRAPH TAB -->
+  <div class="panel" id="panel-graph">
+    <div class="graph-stats" id="graphStats">Loading graph...</div>
+    <div class="graph-wrap" id="graphWrap">
+      <div id="graphCanvasHost" style="width:100%; height:100%;"></div>
+      <div class="graph-legend" id="graphLegend"></div>
+      <div class="graph-detail" id="graphDetail"></div>
+    </div>
+  </div>
+
   <div class="section-label">Recent Thoughts</div>
   <div id="list"><div class="empty">Loading...</div></div>
 
@@ -375,6 +412,7 @@
       document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'))
       btn.classList.add('active')
       document.getElementById('panel-' + btn.dataset.tab).classList.add('active')
+      if (btn.dataset.tab === 'graph') loadGraph()
     })
   })
 
@@ -612,6 +650,122 @@
   function clearSearch() {
     document.getElementById('searchInput').value = ''
     document.getElementById('searchResults').innerHTML = ''
+  }
+
+  // ---------- graph tab ----------
+
+  const CATEGORY_COLORS = {
+    idea: '#6366f1',
+    learning: '#22c55e',
+    question: '#f59e0b',
+    reference: '#38bdf8',
+    plan: '#ec4899',
+    reflection: '#a78bfa',
+    digest: '#94a3b8',
+    uncategorized: '#555',
+  }
+
+  let graphLoaded = false
+  let graphInstance = null
+
+  function renderGraphLegend() {
+    const legend = document.getElementById('graphLegend')
+    legend.innerHTML = Object.entries(CATEGORY_COLORS).map(([cat, color]) => `
+      <div class="row"><div class="swatch" style="background:${color}"></div>${cat}</div>
+    `).join('')
+  }
+
+  function showGraphDetail(node) {
+    const detail = document.getElementById('graphDetail')
+    detail.style.display = 'block'
+    detail.innerHTML = `
+      <button class="close-detail" onclick="document.getElementById('graphDetail').style.display='none'">Close</button>
+      <div style="color:#666; font-size:0.72rem; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:8px;">${esc(node.category || 'uncategorized')} · ${fmt(node.created_at)}</div>
+      <div>${esc(node.content)}</div>
+    `
+  }
+
+  async function loadGraph() {
+    if (graphLoaded) {
+      if (graphInstance) setTimeout(() => graphInstance.zoomToFit(400, 40), 50)
+      return
+    }
+    graphLoaded = true
+    renderGraphLegend()
+    const stats = document.getElementById('graphStats')
+    const wrap = document.getElementById('graphWrap')
+    const canvasHost = document.getElementById('graphCanvasHost')
+
+    try {
+      const [thoughtsRes, linksRes] = await Promise.all([
+        db.from('thoughts').select('id,content,category,summary,created_at'),
+        db.from('thought_links').select('source_thought_id,target_thought_id,similarity_score'),
+      ])
+      if (thoughtsRes.error) throw thoughtsRes.error
+      if (linksRes.error) throw linksRes.error
+
+      const thoughts = thoughtsRes.data
+      const links = linksRes.data
+
+      if (!thoughts.length) {
+        stats.textContent = 'No thoughts yet — save something first.'
+        return
+      }
+
+      const linkedIds = new Set()
+      links.forEach(l => { linkedIds.add(l.source_thought_id); linkedIds.add(l.target_thought_id) })
+
+      stats.textContent = `${thoughts.length} thoughts · ${links.length} connections · ${linkedIds.size} linked, ${thoughts.length - linkedIds.size} isolated`
+
+      const nodes = thoughts.map(t => ({
+        id: t.id,
+        content: t.content,
+        category: t.category,
+        created_at: t.created_at,
+        label: (t.summary || t.content).slice(0, 60),
+      }))
+
+      const graphLinks = links.map(l => ({
+        source: l.source_thought_id,
+        target: l.target_thought_id,
+        value: l.similarity_score,
+      }))
+
+      // Wait a frame so the tab is actually laid out (display:block) before
+      // force-graph measures the container — sizing it at 0x0 makes the
+      // library throw internally.
+      requestAnimationFrame(() => {
+        if (!wrap.clientWidth || !wrap.clientHeight) {
+          stats.textContent += ' — graph area has no size, try resizing the window'
+          return
+        }
+        graphInstance = ForceGraph()(canvasHost)
+          .graphData({ nodes, links: graphLinks })
+          .backgroundColor('#0a0a0a')
+          .nodeId('id')
+          .nodeLabel('label')
+          .nodeColor(n => CATEGORY_COLORS[n.category] || CATEGORY_COLORS.uncategorized)
+          .nodeRelSize(4)
+          .linkColor(() => 'rgba(150,150,160,0.25)')
+          .linkWidth(l => Math.max(l.value * 3, 0.5))
+          .onNodeClick(showGraphDetail)
+          .onNodeHover(n => { wrap.style.cursor = n ? 'pointer' : 'default' })
+          .width(wrap.clientWidth)
+          .height(wrap.clientHeight)
+          .cooldownTicks(100)
+
+        window.addEventListener('resize', () => {
+          // Skip while the Graph tab isn't visible — a hidden container has
+          // 0 width/height, and resizing the canvas to 0x0 is what crashes it.
+          if (graphInstance && wrap.clientWidth && wrap.clientHeight) {
+            graphInstance.width(wrap.clientWidth).height(wrap.clientHeight)
+          }
+        })
+      })
+    } catch (e) {
+      graphLoaded = false
+      stats.textContent = 'Could not load graph: ' + e.message
+    }
   }
 
   // ---------- pwa ----------
