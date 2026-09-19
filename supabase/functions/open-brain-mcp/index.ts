@@ -127,6 +127,19 @@ const TOOLS = [
     },
   },
   {
+    name: 'refresh_profile',
+    description: 'Regenerate a person\'s profile summary from their current facts and recent timeline, without adding anything to their file. Use it after changing the avoided topics or the profile rules, or to check a profile. Entries that touch an avoided topic are left out before the summary is written. Returns "refreshed" with the new summary, or "failed" with a reason and leaves the existing profile untouched.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        person_id: { type: 'string' },
+        profile_max_words: { type: 'number', description: 'Profile length limit, from parameters.md' },
+        avoid_topics: { type: 'array', items: { type: 'string' }, description: 'Topics the profile must never mention, from parameters.md' },
+      },
+      required: ['person_id'],
+    },
+  },
+  {
     name: 'get_person',
     description: 'Read a person\'s whole file: profile summary, follow-up, identifiers, current facts, superseded facts (history), and their 20 most recent timeline entries. Look them up by id, exact name, or one identifier. Status "ambiguous" means several people share that name: ask which one.',
     inputSchema: {
@@ -470,6 +483,8 @@ async function callTool(name: string, args: Record<string, unknown>) {
       return await addInteraction(args)
     case 'set_fact':
       return await setFact(args)
+    case 'refresh_profile':
+      return await people.refreshProfile(String(args.person_id ?? ''), profileOptions(args))
     case 'get_person':
       return await getPerson(args)
     case 'search_people':
