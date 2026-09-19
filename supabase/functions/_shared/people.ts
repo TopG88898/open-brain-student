@@ -6,6 +6,8 @@
  * lives in people-store.ts; the MCP tools in open-brain-mcp call this module.
  */
 
+import { touchesAvoidedTopic } from './sensitive-topics.ts'
+
 export type IdentifierType = 'phone' | 'email' | 'telegram' | 'alias'
 export type ExclusionType = IdentifierType | 'domain'
 
@@ -383,10 +385,15 @@ function profilePrompt(
   maxWords: number,
   avoidTopics: string[],
 ): string {
-  const active = facts.filter((f) => f.superseded_at === null)
+  // The summarizer is asked to avoid these topics, and never sees an entry that touches one:
+  // a request it can ignore is not a guard.
+  const clean = (text: string) => !touchesAvoidedTopic(text, avoidTopics)
+  const active = facts.filter((f) => f.superseded_at === null && clean(`${f.key} ${f.value}`))
+  const shown = interactions.filter((i) => clean(i.summary))
   return [
     `You maintain Ethan's private file on ${person.name}${person.relationship ? ` (${person.relationship})` : ''}. Ethan is the file's owner, and the interactions below are his exchanges with them.`,
     `Write a profile summary of at most ${maxWords} words, in plain prose, using only the facts and interactions below. It is about ${person.name}, not about Ethan: say who ${person.name} is and how Ethan knows them, then what ${person.name} is doing or has said. Mention Ethan only where needed to explain the relationship.`,
+    `Attribute every action to the person the interaction names: what Ethan asked, offered, sent or arranged stays Ethan's, and what ${person.name} said or did stays ${person.name}'s.`,
     'State only what the facts and interactions say. Do not speculate, interpret, or comment on their significance. Do not quote messages verbatim.',
     avoidTopics.length ? `Never mention: ${avoidTopics.join(', ')}.` : '',
     '',
@@ -394,8 +401,8 @@ function profilePrompt(
     ...(active.length ? active.map((f) => `- ${f.key}: ${f.value}`) : ['- none']),
     '',
     'Recent interactions (newest first):',
-    ...(interactions.length
-      ? interactions.map((i) => `- [${i.occurred_at.slice(0, 10)} ${i.source}] ${i.summary}`)
+    ...(shown.length
+      ? shown.map((i) => `- [${i.occurred_at.slice(0, 10)} ${i.source}] ${i.summary}`)
       : ['- none']),
   ]
     .filter((line, n, all) => line !== '' || all[n - 1] !== '')

@@ -581,6 +581,60 @@ describe('refreshProfile', () => {
     assert.match(prompt, /who Test Person is and how Ethan knows them/)
   })
 
+  it('keeps each action with whoever did it, and leaves out entries that touch an avoided topic', async () => {
+    const person = await someone('Test Person')
+    await people.addInteraction({ person_id: person.id, source: 'imessage', summary: 'Ethan asked Test Person about the launch plan.' })
+    await people.addInteraction({ person_id: person.id, source: 'imessage', summary: 'Test Person headed to worship night.' })
+    await people.addInteraction({ person_id: person.id, source: 'imessage', summary: 'Test Person saw a doctor about a knee.' })
+    let prompt = ''
+
+    await people.refreshProfile(person.id, {
+      summarize: async (p) => {
+        prompt = p
+        return 'Test Person is a friend.'
+      },
+      avoidTopics: ['religion', 'medical'],
+    })
+
+    assert.match(prompt, /launch plan/)
+    assert.doesNotMatch(prompt, /worship/)
+    assert.doesNotMatch(prompt, /doctor/)
+    assert.match(prompt, /Attribute every action/)
+  })
+
+  it('leaves out a fact that touches an avoided topic', async () => {
+    const person = await someone('Test Person')
+    await people.setFact(person.id, 'employer', 'Acme')
+    await people.setFact(person.id, 'church', 'St. Mark')
+    let prompt = ''
+
+    await people.refreshProfile(person.id, {
+      summarize: async (p) => {
+        prompt = p
+        return 'Test Person works at Acme.'
+      },
+      avoidTopics: ['religion'],
+    })
+
+    assert.match(prompt, /Acme/)
+    assert.doesNotMatch(prompt, /St\. Mark/)
+  })
+
+  it('passes every entry when no topics are avoided', async () => {
+    const person = await someone('Test Person')
+    await people.addInteraction({ person_id: person.id, source: 'imessage', summary: 'Test Person headed to worship night.' })
+    let prompt = ''
+
+    await people.refreshProfile(person.id, {
+      summarize: async (p) => {
+        prompt = p
+        return 'Test Person is a friend.'
+      },
+    })
+
+    assert.match(prompt, /worship/)
+  })
+
   it('keeps the previous profile when the summarizer fails', async () => {
     const person = await someone('Test Person')
     await people.addInteraction({ person_id: person.id, source: 'note', summary: 'Likes hiking.' })
