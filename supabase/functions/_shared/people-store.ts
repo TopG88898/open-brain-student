@@ -94,6 +94,8 @@ export function createRestPeopleStore(config: RestStoreConfig): PeopleStore {
 
     getPerson,
 
+    peopleByIds: (ids) => peopleByIds(ids.filter((id) => UUID.test(id))),
+
     async insertPerson(fields) {
       const rows = await rest<Person[]>('people', {
         method: 'POST',

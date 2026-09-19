@@ -53,6 +53,10 @@ export function createMemoryStore(): PeopleStore {
       return people.get(id) ?? null
     },
 
+    async peopleByIds(ids) {
+      return ids.map((id) => people.get(id)).filter((p): p is Person => !!p)
+    },
+
     async insertPerson(fields) {
       const person: Person = {
         id: nextId(),

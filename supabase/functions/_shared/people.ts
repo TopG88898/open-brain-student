@@ -118,6 +118,8 @@ export interface PeopleStore {
   /** People whose name, or a name alias, equals `name` ignoring case. */
   peopleByName(name: string): Promise<Person[]>
   getPerson(id: string): Promise<Person | null>
+  /** The people with these ids, in any order. An id with no person is left out. */
+  peopleByIds(ids: string[]): Promise<Person[]>
   insertPerson(fields: PersonFields & { name: string }): Promise<Person>
   updatePerson(id: string, fields: PersonFields): Promise<Person>
   addIdentifiers(personId: string, ids: Identifier[]): Promise<void>
@@ -699,7 +701,14 @@ export function createPeople(deps: PeopleDeps): People {
 
     async listReviewQueue() {
       const items = await store.openReviewItems()
-      return { count: items.length, items }
+      // A suggestion is saved with the name it was found under, often a bare phone number. Show
+      // the person's name as it is now, so a rename is not hidden from the review.
+      const ids = [...new Set(items.filter((i) => i.kind === 'suggestion' && i.person_id).map((i) => i.person_id!))]
+      const named = new Map((ids.length ? await store.peopleByIds(ids) : []).map((p) => [p.id, p.name]))
+      return {
+        count: items.length,
+        items: items.map((i) => (i.kind === 'suggestion' && i.person_id && named.has(i.person_id) ? { ...i, subject: named.get(i.person_id)! } : i)),
+      }
     },
 
     async upsertPerson(input) {

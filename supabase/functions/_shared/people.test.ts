@@ -966,6 +966,18 @@ describe('review queue', () => {
     })
   })
 
+  it('shows a suggested person by their current name once they have been renamed', async () => {
+    await sweep([cand({ name: '+13035550142', identifiers: [{ type: 'phone', value: '303-555-0142' }] })])
+    const [queued] = (await people.listReviewQueue()).items
+    if (!queued.person_id) throw new Error('setup failed')
+
+    await people.upsertPerson({ id: queued.person_id, name: 'Sarah Miller' })
+
+    const [item] = (await people.listReviewQueue()).items
+    assert.equal(item.subject, 'Sarah Miller')
+    assert.equal(item.person_id, queued.person_id)
+  })
+
   it('queues nothing when the caller is a live conversation that will ask for approval itself', async () => {
     await people.suggestPeople({ candidates: [cand()], criteria: CRITERIA })
 
