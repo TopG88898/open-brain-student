@@ -37,11 +37,11 @@ The date of a Person's most recent Exchange.
 _Avoid_: Last seen, last active
 
 **Fact**:
-One current, labelled claim about a Person, such as their employer or city.
+One current, labelled claim about a Person, such as their employer or city. Ethan can state one himself; a Sync also records what a Person plainly says about themselves, and that Fact points at the Interaction it came from. A Fact Ethan stated has no such source and is never overridden by one a Sync recorded.
 _Avoid_: Attribute, field, detail
 
 **Superseded**:
-A Fact that a correction replaced. It stays in the File as history and is never used in the Profile.
+A Fact that a correction, or a later message from the Person, replaced. It stays in the File as history and is never used in the Profile.
 _Avoid_: Deleted, overwritten, stale
 
 **Profile**:
@@ -89,7 +89,7 @@ A phone number, email, handle, name or domain that is never read, summarized or 
 _Avoid_: Blocklist, blacklist, ignore list
 
 **Sensitive topic**:
-A subject, such as health, legal or financial matters, that is never written into any summary, even for an approved Person.
+A subject, such as health, legal, financial or religion, that is never written into any summary, even for an approved Person. An entry that touches one is also left out of the Profile.
 _Avoid_: Private topic, restricted content
 
 **Forget**:
