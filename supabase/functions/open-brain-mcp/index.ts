@@ -2,9 +2,16 @@
 // Speaks JSON-RPC 2.0 over HTTP so any MCP-compatible AI (via a bridge like
 // mcp-remote, or a native HTTP-MCP client) can search and add to the brain.
 
+import { createPeople, type Candidate, type Identifier, type InteractionSource } from '../_shared/people.ts'
+import { createRestPeopleStore } from '../_shared/people-store.ts'
+
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 const MCP_ACCESS_KEY = Deno.env.get('MCP_ACCESS_KEY')!
+
+const people = createPeople({
+  store: createRestPeopleStore({ supabaseUrl: SUPABASE_URL, serviceRoleKey: SERVICE_ROLE_KEY }),
+})
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -20,7 +27,7 @@ function dbHeaders() {
   }
 }
 
-// ---------- the three tools the AI can call ----------
+// ---------- the tools the AI can call ----------
 
 const TOOLS = [
   {
@@ -47,6 +54,171 @@ const TOOLS = [
       type: 'object',
       properties: { content: { type: 'string', description: 'The text to save' } },
       required: ['content'],
+    },
+  },
+  {
+    name: 'upsert_person',
+    description: 'Create or update the file on a person. Identity is decided by exact identifier (phone, email, Telegram handle), never by name alone. If the identifiers match an existing person, that person is returned (status "matched") and any new identifiers are added to them. If only the NAME matches someone, nothing is created and status is "possible_duplicate" with the candidates: ask the user whether it is the same person, then either call again with that candidate\'s "id" (same person) or with confirm_new=true (different person). Status "conflict" means the identifiers belong to two different existing people: never merge them, tell the user. Status "excluded" means the user asked never to track this person: do not create a file and do not mention their details. Pass "id" to update an existing person (relationship, follow-up, extra identifiers).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Existing person id, to update them' },
+        name: { type: 'string', description: 'Full name (required when creating)' },
+        identifiers: {
+          type: 'array',
+          description: 'How this person is recognised. Phone numbers may be written any way; emails are case-insensitive.',
+          items: {
+            type: 'object',
+            properties: {
+              type: { type: 'string', enum: ['phone', 'email', 'telegram', 'alias'] },
+              value: { type: 'string' },
+            },
+            required: ['type', 'value'],
+          },
+        },
+        relationship: { type: 'string', description: 'e.g. friend, colleague, client, family' },
+        follow_up_at: { type: 'string', description: 'ISO 8601 date-time to follow up with them' },
+        follow_up_note: { type: 'string', description: 'What the follow-up is about' },
+        confirm_new: { type: 'boolean', description: 'Create a new person even though the name matches someone else. Only after the user confirms they are different.' },
+      },
+    },
+  },
+  {
+    name: 'add_interaction',
+    description: 'Add one dated entry to a person\'s timeline: a text conversation, email thread, meeting, or a note the user dictated (source "note"). Write "summary" yourself as a short factual summary of what happened or what the user said: never paste message text verbatim, and leave out sensitive topics (health, legal, financial) listed in the project parameters. Pass "source_ref" (e.g. a Gmail thread id) for anything that came from a source, so the same message is never stored twice (status "duplicate"). Notes do not count as contact. Regenerates the person\'s profile summary afterwards unless refresh_profile is false.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        person_id: { type: 'string' },
+        source: { type: 'string', enum: ['imessage', 'email', 'note', 'meeting', 'telegram'] },
+        summary: { type: 'string', description: 'Short factual summary, never verbatim message text' },
+        occurred_at: { type: 'string', description: 'ISO 8601 date-time it happened (default: now)' },
+        direction: { type: 'string', enum: ['in', 'out'], description: 'in = they contacted the user, out = the user contacted them' },
+        source_ref: { type: 'string', description: 'Stable id of the source message or thread, for dedup' },
+        refresh_profile: { type: 'boolean', description: 'Regenerate the profile summary after adding (default true)' },
+        profile_max_words: { type: 'number', description: 'Profile length limit, from parameters.md' },
+        avoid_topics: { type: 'array', items: { type: 'string' }, description: 'Topics the profile must never mention, from parameters.md' },
+      },
+      required: ['person_id', 'source', 'summary'],
+    },
+  },
+  {
+    name: 'set_fact',
+    description: 'Record or correct one fact about a person, e.g. key "employer", value "Beacon". If the fact already has a different value, the old value is kept as history marked superseded, not deleted, so use this for corrections too ("actually she works at Beacon now"). Returns "unchanged" if the value is already recorded.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        person_id: { type: 'string' },
+        key: { type: 'string', description: 'Short label, e.g. employer, city, birthday, partner' },
+        value: { type: 'string' },
+        profile_max_words: { type: 'number' },
+        avoid_topics: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['person_id', 'key', 'value'],
+    },
+  },
+  {
+    name: 'get_person',
+    description: 'Read a person\'s whole file: profile summary, follow-up, identifiers, current facts, superseded facts (history), and their 20 most recent timeline entries. Look them up by id, exact name, or one identifier. Status "ambiguous" means several people share that name: ask which one.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        name: { type: 'string' },
+        identifier_type: { type: 'string', enum: ['phone', 'email', 'telegram', 'alias'] },
+        identifier_value: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'search_people',
+    description: 'Find people by part of their name, and find timeline entries by meaning (e.g. "who mentioned moving?"). Returns matching people and the most relevant interactions with the person\'s name on each.',
+    inputSchema: {
+      type: 'object',
+      properties: { query: { type: 'string', description: 'A name fragment or a description of what happened' } },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'forget_person',
+    description: 'PERMANENTLY delete a person\'s file (identifiers, facts, timeline) and add them to the exclusion list so they are never suggested again. This cannot be undone. Always call it first with confirm=false, tell the user whose file will be deleted, and call again with confirm=true only after they say yes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        person_id: { type: 'string' },
+        confirm: { type: 'boolean', description: 'true only after the user has explicitly confirmed' },
+      },
+      required: ['person_id', 'confirm'],
+    },
+  },
+  {
+    name: 'start_sync',
+    description: 'Begin a sync of one source ("email" or "imessage"). Returns "since": read messages from that time forward. It is where the last finished sync stopped, or "lookback_days" ago on the first sync. Note the current time BEFORE reading and pass it to finish_sync afterwards, so messages that arrive while you read are not missed (duplicates are harmless: source_ref dedups them).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        source: { type: 'string', enum: ['email', 'imessage'] },
+        lookback_days: { type: 'number', description: 'How far back the first sync reads, from parameters.md' },
+      },
+      required: ['source', 'lookback_days'],
+    },
+  },
+  {
+    name: 'finish_sync',
+    description: 'Record that a source has been read up to "through" (the time you noted before reading). Call it only after every step of the sync succeeded, so a failed sync is retried from the same point. The marker never moves backwards.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        source: { type: 'string', enum: ['email', 'imessage'] },
+        through: { type: 'string', description: 'ISO 8601 time the sync started reading' },
+      },
+      required: ['source', 'through'],
+    },
+  },
+  {
+    name: 'suggest_people',
+    description: 'Decide who from a scan of texts or email is worth a file. Pass one candidate per person (group by identifier) with how many messages Ethan sent them and they sent Ethan, and the thresholds from parameters.md. Returns one result per candidate, in order: "suggested" (new, awaiting approval), "already_suggested" (still awaiting approval), "has_file" (already approved: add their interactions), "skipped" with a reason (below_threshold, one_way, automated, excluded, dismissed, invalid_identifier: say nothing about excluded people), "possible_duplicate" (same name as an existing person: ask Ethan) or "conflict" (identifiers on two files: report it, never merge). Nothing here sends, replies to or labels any message. Suggested people get no file until resolve_suggestion approves them.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        candidates: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              identifiers: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: { type: { type: 'string', enum: ['phone', 'email', 'telegram'] }, value: { type: 'string' } },
+                  required: ['type', 'value'],
+                },
+              },
+              sent: { type: 'number', description: 'Messages Ethan sent this person in the scanned window' },
+              received: { type: 'number', description: 'Messages this person sent Ethan' },
+              automated: { type: 'boolean', description: 'true if the sender looks like bulk, marketing or system mail (list headers, Promotions/Updates category)' },
+            },
+            required: ['name', 'identifiers', 'sent', 'received'],
+          },
+        },
+        min_messages: { type: 'number', description: 'suggest_min_messages from parameters.md' },
+        min_each_way: { type: 'number', description: 'suggest_min_each_way from parameters.md' },
+        ignore_no_reply: { type: 'boolean', description: 'ignore_no_reply_senders from parameters.md' },
+      },
+      required: ['candidates', 'min_messages', 'min_each_way', 'ignore_no_reply'],
+    },
+  },
+  {
+    name: 'resolve_suggestion',
+    description: 'Apply Ethan\'s decision on a suggested person: "approve" gives them a file (status active), "dismiss" means never suggest them again (they are remembered as dismissed, not deleted). Approving a dismissed person reverses the dismissal. Dismiss never touches an approved file: use forget_person for that. Only call this after Ethan has said which people to approve or dismiss.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        person_id: { type: 'string' },
+        decision: { type: 'string', enum: ['approve', 'dismiss'] },
+      },
+      required: ['person_id', 'decision'],
     },
   },
 ]
@@ -149,8 +321,140 @@ async function addThought(content: string) {
   return rows[0]
 }
 
+// ---------- people ----------
+
+const optionalString = (v: unknown) => (typeof v === 'string' && v.trim() ? v : undefined)
+
+async function summarizeWithLLM(prompt: string): Promise<string> {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/call-llm`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${SERVICE_ROLE_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      prompt,
+      maxTokens: 500,
+      systemPrompt: 'You write concise, factual profile summaries. Output only the summary text.',
+    }),
+  })
+  if (!res.ok) throw new Error(`call-llm failed: ${res.status} ${await res.text()}`)
+  return (await res.json()).text
+}
+
+function profileOptions(args: Record<string, unknown>) {
+  return {
+    summarize: summarizeWithLLM,
+    maxWords: typeof args.profile_max_words === 'number' ? args.profile_max_words : undefined,
+    avoidTopics: Array.isArray(args.avoid_topics) ? args.avoid_topics.map(String) : undefined,
+  }
+}
+
+async function upsertPerson(args: Record<string, unknown>) {
+  return people.upsertPerson({
+    id: optionalString(args.id),
+    name: optionalString(args.name),
+    identifiers: Array.isArray(args.identifiers) ? (args.identifiers as Identifier[]) : undefined,
+    relationship: optionalString(args.relationship),
+    follow_up_at: optionalString(args.follow_up_at),
+    follow_up_note: optionalString(args.follow_up_note),
+    confirm_new: args.confirm_new === true,
+  })
+}
+
+async function addInteraction(args: Record<string, unknown>) {
+  const summary = String(args.summary ?? '')
+  // Embedding is best-effort: the entry still saves, it just isn't semantically searchable.
+  const embedding = summary.trim() ? await generateEmbedding(summary) : null
+  const result = await people.addInteraction({
+    person_id: String(args.person_id ?? ''),
+    source: String(args.source ?? '') as InteractionSource,
+    summary,
+    occurred_at: optionalString(args.occurred_at),
+    direction: args.direction === 'in' || args.direction === 'out' ? args.direction : undefined,
+    source_ref: optionalString(args.source_ref),
+    embedding: embedding ?? undefined,
+  })
+  if (result.status !== 'added' || args.refresh_profile === false) return result
+  const profile = await people.refreshProfile(String(args.person_id), profileOptions(args))
+  return { ...result, profile }
+}
+
+async function setFact(args: Record<string, unknown>) {
+  const personId = String(args.person_id ?? '')
+  const result = await people.setFact(personId, String(args.key ?? ''), String(args.value ?? ''))
+  if (result.status !== 'set') return result
+  const profile = await people.refreshProfile(personId, profileOptions(args))
+  return { ...result, profile }
+}
+
+async function getPerson(args: Record<string, unknown>) {
+  const identifier = optionalString(args.identifier_value)
+    ? ({ type: String(args.identifier_type ?? ''), value: String(args.identifier_value) } as Identifier)
+    : undefined
+  return people.getPerson({ id: optionalString(args.id), name: optionalString(args.name), identifier })
+}
+
+async function searchPeople(query: string) {
+  const fragment = encodeURIComponent(`*${query.replace(/[\\%_*]/g, (c) => `\\${c}`)}*`)
+  const peopleRes = await fetch(
+    `${SUPABASE_URL}/rest/v1/people?name=ilike.${fragment}&select=id,name,relationship,profile_summary,last_contact_at,follow_up_at&limit=10`,
+    { headers: dbHeaders() },
+  )
+  if (!peopleRes.ok) throw new Error(`People search failed: ${peopleRes.status} ${await peopleRes.text()}`)
+
+  // Like search_thoughts: meaning first, keywords if embeddings are unavailable. The cutoff is
+  // lower than search_thoughts (0.3): short queries like "moving" score ~0.25 against a note
+  // that says "moved to Denver", and a personal file set is small enough to absorb the noise.
+  const embedding = await generateEmbedding(query)
+  const interactionsRes = embedding
+    ? await fetch(`${SUPABASE_URL}/rest/v1/rpc/search_interactions`, {
+        method: 'POST',
+        headers: dbHeaders(),
+        body: JSON.stringify({ query_embedding: embedding, match_threshold: 0.2, match_count: 10 }),
+      })
+    : await fetch(
+        `${SUPABASE_URL}/rest/v1/interactions?summary=ilike.${fragment}&select=id,person_id,source,occurred_at,summary&order=occurred_at.desc&limit=10`,
+        { headers: dbHeaders() },
+      )
+  if (!interactionsRes.ok) {
+    throw new Error(`Interaction search failed: ${interactionsRes.status} ${await interactionsRes.text()}`)
+  }
+  return { people: await peopleRes.json(), interactions: await interactionsRes.json() }
+}
+
 async function callTool(name: string, args: Record<string, unknown>) {
   switch (name) {
+    case 'upsert_person':
+      return await upsertPerson(args)
+    case 'add_interaction':
+      return await addInteraction(args)
+    case 'set_fact':
+      return await setFact(args)
+    case 'get_person':
+      return await getPerson(args)
+    case 'search_people':
+      return await searchPeople(String(args.query ?? ''))
+    case 'forget_person':
+      return await people.forgetPerson(String(args.person_id ?? ''), { confirm: args.confirm === true })
+    case 'start_sync':
+      return await people.startSync(String(args.source ?? ''), {
+        lookback_days: typeof args.lookback_days === 'number' ? args.lookback_days : 30,
+      })
+    case 'finish_sync':
+      return await people.finishSync(String(args.source ?? ''), String(args.through ?? ''))
+    case 'suggest_people':
+      return await people.suggestPeople({
+        candidates: Array.isArray(args.candidates) ? (args.candidates as Candidate[]) : [],
+        criteria: {
+          min_messages: Number(args.min_messages),
+          min_each_way: Number(args.min_each_way),
+          ignore_no_reply: args.ignore_no_reply !== false,
+        },
+      })
+    case 'resolve_suggestion':
+      // No default: an unrecognised decision must never be read as approval.
+      if (args.decision !== 'approve' && args.decision !== 'dismiss') {
+        throw new Error('decision must be "approve" or "dismiss"')
+      }
+      return await people.resolveSuggestion(String(args.person_id ?? ''), args.decision)
     case 'search_thoughts':
       return await searchThoughts(String(args.query ?? ''))
     case 'list_recent':
@@ -206,7 +510,7 @@ Deno.serve(async (req) => {
       return json(rpcResult(id, {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'open-brain-mcp', version: '1.0.0' },
+        serverInfo: { name: 'open-brain-mcp', version: '1.2.0' },
       }))
     }
 
