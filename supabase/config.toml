@@ -23,3 +23,6 @@ verify_jwt = true
 
 [functions.backfill-links]
 verify_jwt = true
+
+[functions.backfill-enrichment]
+verify_jwt = true

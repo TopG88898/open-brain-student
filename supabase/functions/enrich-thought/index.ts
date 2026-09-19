@@ -2,6 +2,8 @@
 // Asks the LLM gateway for tags/category/summary, then writes them back.
 // Webhook functions should never fail the insert, so this always returns 200.
 
+import { saveThoughtChunksSafe } from '../_shared/thought-chunks.ts'
+
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 
@@ -129,16 +131,24 @@ Deno.serve(async (req) => {
       return new Response('ok', { status: 200 })
     }
 
-    const prompt = `Analyze this note and respond with ONLY this JSON shape, nothing else:
+    // weekly-digest sets category:'digest' itself — a digest summarizes other
+    // thoughts, so AI tags/category/summary don't apply. Still embed + link
+    // it, just skip the LLM re-tagging step that would overwrite 'digest'.
+    let enrichment: { tags: string[]; category: string | null; summary: string | null }
+    if (record?.category === 'digest') {
+      enrichment = { tags: [], category: 'digest', summary: null }
+    } else {
+      const prompt = `Analyze this note and respond with ONLY this JSON shape, nothing else:
 {"tags": ["tag1","tag2","tag3"], "category": "one of: ${CATEGORIES.join(', ')}", "summary": "one sentence, max 20 words"}
 
 Note:
 """
 ${content.slice(0, 4000)}
 """`
+      const raw = await callLLM(prompt)
+      enrichment = parseEnrichment(raw)
+    }
 
-    const raw = await callLLM(prompt)
-    const enrichment = parseEnrichment(raw)
     const embedding = await generateEmbedding(content)
     await updateThought(id, { ...enrichment, embedding })
 
@@ -146,6 +156,8 @@ ${content.slice(0, 4000)}
       const linkResult = await autoLink(id, embedding)
       if (!linkResult.startsWith('ok')) console.error('autoLink:', linkResult)
     }
+
+    await saveThoughtChunksSafe(id, content, 'enrich-thought', 'summary')
 
     return new Response('ok', { status: 200 })
   } catch (err) {
