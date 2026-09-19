@@ -58,7 +58,7 @@ const TOOLS = [
   },
   {
     name: 'upsert_person',
-    description: 'Create or update the file on a person. Identity is decided by exact identifier (phone, email, Telegram handle), never by name alone. If the identifiers match an existing person, that person is returned (status "matched") and any new identifiers are added to them. If only the NAME matches someone, nothing is created and status is "possible_duplicate" with the candidates: ask the user whether it is the same person, then either call again with that candidate\'s "id" (same person) or with confirm_new=true (different person). Status "conflict" means the identifiers belong to two different existing people: never merge them, tell the user. Status "excluded" means the user asked never to track this person: do not create a file and do not mention their details. Pass "id" to update an existing person (relationship, follow-up, extra identifiers).',
+    description: 'Create or update the file on a person. Identity is decided by exact identifier (phone, email, Telegram handle), never by name alone. If the identifiers match an existing person, that person is returned (status "matched") and any new identifiers are added to them. If only the NAME matches someone, nothing is created and status is "possible_duplicate" with the candidates: ask the user whether it is the same person, then either call again with that candidate\'s "id" (same person) or with confirm_new=true (different person). Status "conflict" means the identifiers belong to two different existing people: never merge them, tell the user. Status "excluded" means the user asked never to track this person: do not create a file and do not mention their details. Pass "id" to update an existing person (name, relationship, follow-up, extra identifiers); a non-blank "name" renames them.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -85,7 +85,7 @@ const TOOLS = [
   },
   {
     name: 'add_interaction',
-    description: 'Add one dated entry to a person\'s timeline: a text conversation, email thread, meeting, or a note the user dictated (source "note"). Write "summary" yourself as a short factual summary of what happened or what the user said: never paste message text verbatim, and leave out sensitive topics (health, legal, financial) listed in the project parameters. Pass "source_ref" (e.g. a Gmail thread id) for anything that came from a source, so the same message is never stored twice (status "duplicate"). Notes do not count as contact. Regenerates the person\'s profile summary afterwards unless refresh_profile is false.',
+    description: 'Add one dated entry to a person\'s timeline: a text conversation, email thread, meeting, or a note the user dictated (source "note"). Write "summary" yourself as a short factual summary of what happened or what the user said: never paste message text verbatim, and leave out sensitive topics (health, legal, financial) listed in the project parameters. Pass "source_ref" (e.g. a Gmail thread id) for anything that came from a source, so the same message is never stored twice (status "duplicate"). Notes do not count as contact. Pass "facts" for things THEY plainly said about themselves in this exchange (employer, city, what they study): each is saved as a Fact pointing at this entry, never overrides a fact the user stated himself, and never replaces a value taken from a newer message; the result lists each as set, unchanged or skipped. Regenerates the person\'s profile summary afterwards unless refresh_profile is false.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -95,6 +95,15 @@ const TOOLS = [
         occurred_at: { type: 'string', description: 'ISO 8601 date-time it happened (default: now)' },
         direction: { type: 'string', enum: ['in', 'out'], description: 'in = they contacted the user, out = the user contacted them' },
         source_ref: { type: 'string', description: 'Stable id of the source message or thread, for dedup' },
+        facts: {
+          type: 'array',
+          description: 'What they plainly said about themselves in this exchange, never a guess and never a sensitive topic. Short lowercase key, e.g. employer, city, school.',
+          items: {
+            type: 'object',
+            properties: { key: { type: 'string' }, value: { type: 'string' } },
+            required: ['key', 'value'],
+          },
+        },
         refresh_profile: { type: 'boolean', description: 'Regenerate the profile summary after adding (default true)' },
         profile_max_words: { type: 'number', description: 'Profile length limit, from parameters.md' },
         avoid_topics: { type: 'array', items: { type: 'string' }, description: 'Topics the profile must never mention, from parameters.md' },
@@ -384,6 +393,13 @@ async function upsertPerson(args: Record<string, unknown>) {
   })
 }
 
+function statedFacts(raw: unknown): { key: string; value: string }[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  return raw
+    .filter((f): f is { key: unknown; value: unknown } => typeof f === 'object' && f !== null)
+    .map((f) => ({ key: String(f.key ?? ''), value: String(f.value ?? '') }))
+}
+
 async function addInteraction(args: Record<string, unknown>) {
   const summary = String(args.summary ?? '')
   // Embedding is best-effort: the entry still saves, it just isn't semantically searchable.
@@ -396,6 +412,7 @@ async function addInteraction(args: Record<string, unknown>) {
     direction: args.direction === 'in' || args.direction === 'out' ? args.direction : undefined,
     source_ref: optionalString(args.source_ref),
     embedding: embedding ?? undefined,
+    facts: statedFacts(args.facts),
   })
   if (result.status !== 'added' || args.refresh_profile === false) return result
   const profile = await people.refreshProfile(String(args.person_id), profileOptions(args))

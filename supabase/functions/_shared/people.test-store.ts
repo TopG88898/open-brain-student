@@ -124,17 +124,25 @@ export function createMemoryStore(): PeopleStore {
       if (fact) fact.superseded_at = at
     },
 
-    async insertFact(personId, key, value) {
+    async insertFact(personId, key, value, sourceInteractionId) {
       const fact: Fact = {
         id: nextId(),
         person_id: personId,
         key,
         value,
         superseded_at: null,
+        source_interaction_id: sourceInteractionId ?? null,
         created_at: stamp(),
       }
       facts.push(fact)
       return fact
+    },
+
+    async getInteraction(id) {
+      const found = interactions.find((i) => i.id === id)
+      if (!found) return null
+      const { embedding: _dropped, ...publicShape } = found
+      return publicShape
     },
 
     async deletePerson(id) {

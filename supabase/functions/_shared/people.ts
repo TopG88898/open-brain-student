@@ -69,6 +69,8 @@ export interface Fact {
   key: string
   value: string
   superseded_at: string | null
+  /** The Interaction this Fact was read from. Null when Ethan stated it himself. */
+  source_interaction_id: string | null
   created_at: string
 }
 
@@ -124,7 +126,8 @@ export interface PeopleStore {
   recentInteractions(personId: string, limit: number): Promise<Interaction[]>
   factsOf(personId: string): Promise<Fact[]>
   supersedeFact(factId: string, at: string): Promise<void>
-  insertFact(personId: string, key: string, value: string): Promise<Fact>
+  insertFact(personId: string, key: string, value: string, sourceInteractionId?: string): Promise<Fact>
+  getInteraction(id: string): Promise<Interaction | null>
   /** Removes the person and everything that hangs off them. */
   deletePerson(id: string): Promise<void>
   addExclusions(entries: ExclusionEntry[]): Promise<void>
@@ -174,10 +177,19 @@ export interface AddInteractionInput {
   direction?: 'in' | 'out'
   source_ref?: string
   embedding?: number[]
+  /** What they plainly said about themselves in this exchange. Saved with this Interaction as their source. */
+  facts?: { key: string; value: string }[]
 }
 
+/** Why a Fact read from an Interaction was not written. */
+export type SkippedFactReason = 'stated_by_ethan' | 'newer_fact'
+
+export type ExtractedFactOutcome =
+  | { key: string; status: 'set' | 'unchanged' }
+  | { key: string; status: 'skipped'; reason: SkippedFactReason }
+
 export type AddInteractionResult =
-  | { status: 'added'; interaction: Interaction }
+  | { status: 'added'; interaction: Interaction; facts?: ExtractedFactOutcome[] }
   | { status: 'duplicate' }
 
 export type SetFactResult =
@@ -373,8 +385,8 @@ function profilePrompt(
 ): string {
   const active = facts.filter((f) => f.superseded_at === null)
   return [
-    `You maintain a private file on ${person.name}${person.relationship ? ` (${person.relationship})` : ''}.`,
-    `Write a profile summary of at most ${maxWords} words, in plain prose, using only the facts and interactions below.`,
+    `You maintain Ethan's private file on ${person.name}${person.relationship ? ` (${person.relationship})` : ''}. Ethan is the file's owner, and the interactions below are his exchanges with them.`,
+    `Write a profile summary of at most ${maxWords} words, in plain prose, using only the facts and interactions below. It is about ${person.name}, not about Ethan: say who ${person.name} is and how Ethan knows them, then what ${person.name} is doing or has said. Mention Ethan only where needed to explain the relationship.`,
     'State only what the facts and interactions say. Do not speculate, interpret, or comment on their significance. Do not quote messages verbatim.',
     avoidTopics.length ? `Never mention: ${avoidTopics.join(', ')}.` : '',
     '',
@@ -525,7 +537,41 @@ export function createPeople(deps: PeopleDeps): People {
     const isNewest = !person.last_contact_at || new Date(occurredAt) > new Date(person.last_contact_at)
     if (isContact && isNewest) await store.updatePerson(person.id, { last_contact_at: occurredAt })
 
-    return { status: 'added', interaction }
+    if (!input.facts) return { status: 'added', interaction }
+    const facts: ExtractedFactOutcome[] = []
+    for (const stated of input.facts) {
+      const outcome = await writeExtractedFact(person.id, interaction, stated.key, stated.value)
+      if (outcome) facts.push(outcome)
+    }
+    return { status: 'added', interaction, facts }
+  }
+
+  /**
+   * A Fact read out of an Interaction never overrides what Ethan stated himself, and an older
+   * message never replaces a value taken from a newer one: a Sync may read messages in any order.
+   */
+  async function writeExtractedFact(
+    personId: string,
+    interaction: Interaction,
+    rawKey: string,
+    rawValue: string,
+  ): Promise<ExtractedFactOutcome | null> {
+    const key = rawKey.trim().toLowerCase()
+    const value = rawValue.trim()
+    if (!key || !value) return null
+
+    const current = (await store.factsOf(personId)).find((f) => f.key === key && f.superseded_at === null)
+    if (current?.value === value) return { key, status: 'unchanged' }
+    if (current) {
+      if (!current.source_interaction_id) return { key, status: 'skipped', reason: 'stated_by_ethan' }
+      const from = await store.getInteraction(current.source_interaction_id)
+      if (from && new Date(from.occurred_at) > new Date(interaction.occurred_at)) {
+        return { key, status: 'skipped', reason: 'newer_fact' }
+      }
+      await store.supersedeFact(current.id, now().toISOString())
+    }
+    await store.insertFact(personId, key, value, interaction.id)
+    return { key, status: 'set' }
   }
 
   return {
@@ -663,7 +709,12 @@ export function createPeople(deps: PeopleDeps): People {
         const others = owners.filter((owner) => owner !== input.id)
         if (others.length) return { status: 'conflict', person_ids: [input.id, ...others] }
         await store.addIdentifiers(input.id, identifiers)
-        const person = await store.updatePerson(input.id, definedOnly(fields))
+        // Only an explicit update by id renames: a name that rides along with a matching
+        // identifier is not a request to rename anyone.
+        const person = await store.updatePerson(
+          input.id,
+          definedOnly({ ...fields, name: input.name?.trim() || undefined }),
+        )
         return { status: 'updated', person }
       }
 

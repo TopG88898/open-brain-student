@@ -100,6 +100,32 @@ describe('upsertPerson', () => {
     assert.equal(result.status, 'created')
   })
 
+  it('renames a person updated by id, keeping their identifiers', async () => {
+    const created = await people.upsertPerson({
+      name: '+13035550142',
+      identifiers: [{ type: 'phone', value: '303-555-0142' }],
+    })
+    if (created.status !== 'created') throw new Error('expected a created person')
+
+    const renamed = await people.upsertPerson({ id: created.person.id, name: '  Sarah Miller ' })
+
+    assert.equal(renamed.status, 'updated')
+    if (renamed.status !== 'updated') return
+    assert.equal(renamed.person.name, 'Sarah Miller')
+    const byPhone = await people.getPerson({ identifier: { type: 'phone', value: '+13035550142' } })
+    assert.equal(byPhone.status === 'found' && byPhone.person.name, 'Sarah Miller')
+  })
+
+  it('keeps the name when an update by id passes a blank one', async () => {
+    const created = await people.upsertPerson({ name: 'Sarah Miller' })
+    if (created.status !== 'created') throw new Error('expected a created person')
+
+    const updated = await people.upsertPerson({ id: created.person.id, name: '   ', relationship: 'friend' })
+
+    assert.equal(updated.status === 'updated' && updated.person.name, 'Sarah Miller')
+    assert.equal(updated.status === 'updated' && updated.person.relationship, 'friend')
+  })
+
   it('reports a conflict instead of merging when identifiers belong to two different people', async () => {
     const a = await people.upsertPerson({
       name: 'Alex Rivera',
@@ -284,6 +310,143 @@ describe('setFact', () => {
   })
 })
 
+describe('addInteraction with facts they stated about themselves', () => {
+  const activeFacts = async (personId: string) => {
+    const file = await people.getPerson({ id: personId })
+    if (file.status !== 'found') throw new Error('not found')
+    return file.facts
+  }
+
+  it('saves each fact with the interaction it came from', async () => {
+    const person = await someone()
+
+    const added = await people.addInteraction({
+      person_id: person.id,
+      source: 'imessage',
+      summary: 'Said they just started at Acme.',
+      facts: [{ key: 'Employer', value: ' Acme ' }],
+    })
+
+    if (added.status !== 'added') throw new Error('expected added')
+    assert.deepEqual(added.facts, [{ key: 'employer', status: 'set' }])
+    const facts = await activeFacts(person.id)
+    assert.equal(facts.active.length, 1)
+    assert.equal(facts.active[0].key, 'employer')
+    assert.equal(facts.active[0].value, 'Acme')
+    assert.equal(facts.active[0].source_interaction_id, added.interaction.id)
+  })
+
+  it('leaves a fact Ethan stated himself alone', async () => {
+    const person = await someone()
+    await people.setFact(person.id, 'employer', 'Beacon')
+
+    const added = await people.addInteraction({
+      person_id: person.id,
+      source: 'imessage',
+      summary: 'Mentioned Acme.',
+      facts: [{ key: 'employer', value: 'Acme' }],
+    })
+
+    if (added.status !== 'added') throw new Error('expected added')
+    assert.deepEqual(added.facts, [{ key: 'employer', status: 'skipped', reason: 'stated_by_ethan' }])
+    const facts = await activeFacts(person.id)
+    assert.deepEqual(facts.active.map((f) => f.value), ['Beacon'])
+    assert.equal(facts.superseded.length, 0)
+  })
+
+  it('replaces an earlier extracted value with a later one, keeping the old as history', async () => {
+    const person = await someone()
+    await people.addInteraction({
+      person_id: person.id,
+      source: 'imessage',
+      summary: 'Works at Acme.',
+      occurred_at: '2026-09-01T12:00:00Z',
+      facts: [{ key: 'employer', value: 'Acme' }],
+    })
+
+    await people.addInteraction({
+      person_id: person.id,
+      source: 'imessage',
+      summary: 'Moved to Beacon.',
+      occurred_at: '2026-09-10T12:00:00Z',
+      facts: [{ key: 'employer', value: 'Beacon' }],
+    })
+
+    const facts = await activeFacts(person.id)
+    assert.deepEqual(facts.active.map((f) => f.value), ['Beacon'])
+    assert.deepEqual(facts.superseded.map((f) => f.value), ['Acme'])
+  })
+
+  it('does not let an older message replace a value taken from a newer one', async () => {
+    const person = await someone()
+    await people.addInteraction({
+      person_id: person.id,
+      source: 'imessage',
+      summary: 'Moved to Beacon.',
+      occurred_at: '2026-09-10T12:00:00Z',
+      facts: [{ key: 'employer', value: 'Beacon' }],
+    })
+
+    const older = await people.addInteraction({
+      person_id: person.id,
+      source: 'imessage',
+      summary: 'Works at Acme.',
+      occurred_at: '2026-09-01T12:00:00Z',
+      facts: [{ key: 'employer', value: 'Acme' }],
+    })
+
+    if (older.status !== 'added') throw new Error('expected added')
+    assert.deepEqual(older.facts, [{ key: 'employer', status: 'skipped', reason: 'newer_fact' }])
+    assert.deepEqual((await activeFacts(person.id)).active.map((f) => f.value), ['Beacon'])
+  })
+
+  it('reports a value that is already recorded as unchanged', async () => {
+    const person = await someone()
+    await people.setFact(person.id, 'city', 'Denver')
+
+    const added = await people.addInteraction({
+      person_id: person.id,
+      source: 'imessage',
+      summary: 'Still in Denver.',
+      facts: [{ key: 'city', value: 'Denver' }],
+    })
+
+    if (added.status !== 'added') throw new Error('expected added')
+    assert.deepEqual(added.facts, [{ key: 'city', status: 'unchanged' }])
+  })
+
+  it('takes no facts from an interaction that was already stored', async () => {
+    const person = await someone()
+    await people.addInteraction({ person_id: person.id, source: 'imessage', summary: 'Hello.', source_ref: 'm1' })
+
+    const again = await people.addInteraction({
+      person_id: person.id,
+      source: 'imessage',
+      summary: 'Hello.',
+      source_ref: 'm1',
+      facts: [{ key: 'employer', value: 'Acme' }],
+    })
+
+    assert.equal(again.status, 'duplicate')
+    assert.equal((await activeFacts(person.id)).active.length, 0)
+  })
+
+  it('ignores a fact with a blank key or value', async () => {
+    const person = await someone()
+
+    const added = await people.addInteraction({
+      person_id: person.id,
+      source: 'imessage',
+      summary: 'Hello.',
+      facts: [{ key: ' ', value: 'Acme' }, { key: 'city', value: '' }],
+    })
+
+    if (added.status !== 'added') throw new Error('expected added')
+    assert.deepEqual(added.facts, [])
+    assert.equal((await activeFacts(person.id)).active.length, 0)
+  })
+})
+
 describe('getPerson', () => {
   it('finds a person by name, and asks which one when two share it', async () => {
     const sarah = await someone('Sarah Miller')
@@ -399,6 +562,23 @@ describe('refreshProfile', () => {
     if (file.status !== 'found') throw new Error('not found')
     assert.equal(file.person.profile_summary, 'Test Person recently moved to Denver and works at Beacon.')
     assert.equal(file.person.profile_updated_at, '2026-09-18T12:00:00.000Z')
+  })
+
+  it('asks for a profile of the person, not of Ethan, saying who they are to him', async () => {
+    const person = await someone('Test Person')
+    await people.addInteraction({ person_id: person.id, source: 'imessage', summary: 'Ethan and Test Person planned lunch.' })
+    let prompt = ''
+
+    await people.refreshProfile(person.id, {
+      summarize: async (p) => {
+        prompt = p
+        return 'Test Person is a friend.'
+      },
+    })
+
+    assert.match(prompt, /Ethan's private file on Test Person/)
+    assert.match(prompt, /about Test Person, not about Ethan/)
+    assert.match(prompt, /who Test Person is and how Ethan knows them/)
   })
 
   it('keeps the previous profile when the summarizer fails', async () => {

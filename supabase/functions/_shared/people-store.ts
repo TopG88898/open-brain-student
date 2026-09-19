@@ -166,13 +166,25 @@ export function createRestPeopleStore(config: RestStoreConfig): PeopleStore {
       })
     },
 
-    async insertFact(personId, key, value) {
+    async insertFact(personId, key, value, sourceInteractionId) {
       const rows = await rest<Fact[]>('person_facts', {
         method: 'POST',
         prefer: 'return=representation',
-        body: JSON.stringify({ person_id: personId, key, value }),
+        body: JSON.stringify({
+          person_id: personId,
+          key,
+          value,
+          ...(sourceInteractionId ? { source_interaction_id: sourceInteractionId } : {}),
+        }),
       })
       return rows[0]
+    },
+
+    async getInteraction(id) {
+      const rows = await rest<Interaction[]>(
+        `interactions?id=eq.${encodeURIComponent(id)}&select=${INTERACTION_COLUMNS}&limit=1`,
+      )
+      return rows[0] ?? null
     },
 
     async deletePerson(id) {
