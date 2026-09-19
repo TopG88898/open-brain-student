@@ -33,14 +33,16 @@ export function parsePersonNote(text: string): PersonNote | null {
 }
 
 /**
- * Stems of the sensitive topics in parameters.md (health, medical, legal, financial) plus their
- * everyday neighbours. The bot has no one to paraphrase a note, so a note that touches one is
- * refused whole rather than filed. Keep in step with `avoid_topics`.
+ * Stems of the sensitive topics in parameters.md (health, medical, legal, financial, religion)
+ * plus their everyday neighbours. The bot has no one to paraphrase a note, so a note that touches
+ * one is refused whole rather than filed. Keep in step with `avoid_topics`.
  */
 const SENSITIVE_STEMS = [
   'health', 'medic', 'doctor', 'diagnos', 'therap', 'surgery', 'cancer',
   'legal', 'lawyer', 'attorney', 'lawsuit', 'sue[sd]?\\b',
   'financ', 'debt', 'bankrupt',
+  'religio', 'church', 'worship', 'pray', 'bible', 'faith', 'sermon', 'baptis',
+  'islam', 'muslim', 'christian', 'jewish', 'mosque', 'synagogue', 'god\\b',
 ]
 const SENSITIVE = new RegExp(`\\b(?:${SENSITIVE_STEMS.join('|')})`, 'i')
 

@@ -7,7 +7,7 @@ This file is committed to a public repo. It never holds names, phone numbers, em
 | Parameter | Value | Meaning |
 | --- | --- | --- |
 | `profile_max_words` | 120 | Longest a Person's Profile may be. |
-| `avoid_topics` | health, medical, legal, financial | Sensitive topics: never written into an Interaction summary or a Profile. |
+| `avoid_topics` | health, medical, legal, financial, religion | Sensitive topics: never written into an Interaction summary or a Profile. |
 | `default_follow_up_days` | 30 | Follow-up date when Ethan asks for one without saying when. |
 | `default_country_code` | 1 | Assumed for phone numbers written without one. |
 | `suggest_min_messages` | 6 | Fewest messages, in total, before someone is suggested. |

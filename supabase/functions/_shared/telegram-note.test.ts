@@ -53,13 +53,24 @@ describe('touchesSensitiveTopic', () => {
       'seeing a medical specialist',
       'hired a lawyer, legal trouble',
       'money is tight, financial stress',
+      'converted to Islam last year',
+      'goes to church every Sunday',
+      'active in a Bible study',
+      'his faith matters a lot to him',
+      'deeply religious family',
     ]) {
       assert.equal(touchesSensitiveTopic(text), true, text)
     }
   })
 
   it('lets ordinary notes through', () => {
-    for (const text of ['moved to Denver', 'new job at Acme', 'loves hiking, has two kids']) {
+    for (const text of [
+      'moved to Denver',
+      'new job at Acme',
+      'loves hiking, has two kids',
+      'goes to the Godfather screening on Friday',
+      'studies at Temple University',
+    ]) {
       assert.equal(touchesSensitiveTopic(text), false, text)
     }
   })
