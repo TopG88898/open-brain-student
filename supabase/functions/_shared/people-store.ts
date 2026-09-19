@@ -9,9 +9,12 @@ import type {
   Identifier,
   Interaction,
   NewInteraction,
+  NewReviewItem,
   PeopleStore,
   Person,
   PersonFields,
+  ReviewItem,
+  ReviewKind,
 } from './people.ts'
 
 export interface RestStoreConfig {
@@ -202,6 +205,33 @@ export function createRestPeopleStore(config: RestStoreConfig): PeopleStore {
         `sync_state?source=eq.${encodeURIComponent(source)}&select=last_synced_at`,
       )
       return rows[0]?.last_synced_at ?? null
+    },
+
+    async saveReviewItem(item: NewReviewItem) {
+      // (kind, key) is a plain unique key, so a repeat merges into the existing item.
+      const rows = await rest<ReviewItem[]>('review_items?on_conflict=kind,key', {
+        method: 'POST',
+        prefer: 'resolution=merge-duplicates,return=representation',
+        body: JSON.stringify(item),
+      })
+      return rows[0]
+    },
+
+    async openReviewItems() {
+      return rest<ReviewItem[]>('review_items?select=*&order=created_at.asc')
+    },
+
+    async getReviewItem(id) {
+      if (!UUID.test(id)) return null
+      const rows = await rest<ReviewItem[]>(`review_items?id=eq.${id}&select=*`)
+      return rows[0] ?? null
+    },
+
+    async closeReviewItems(kind: ReviewKind, key: string) {
+      await rest(`review_items?kind=eq.${kind}&key=eq.${encodeURIComponent(key)}`, {
+        method: 'DELETE',
+        prefer: 'return=minimal',
+      })
     },
 
     async setSyncedAt(source, at) {

@@ -72,6 +72,33 @@ export interface Fact {
   created_at: string
 }
 
+/** What needs Ethan's decision. A Sweep leaves these for him instead of asking. */
+export type ReviewKind = 'suggestion' | 'possible_duplicate' | 'conflict'
+
+export interface ReviewDetail {
+  source: string
+  identifiers: Identifier[]
+  sent?: number
+  received?: number
+  /** possible_duplicate: the existing people who share the name. */
+  candidate_ids?: string[]
+  /** conflict: the existing people who each own one of the identifiers. */
+  person_ids?: string[]
+}
+
+export interface ReviewItem {
+  id: string
+  kind: ReviewKind
+  /** What makes two items the same question: the person id, the identifiers, or the owner ids. */
+  key: string
+  person_id: string | null
+  subject: string
+  detail: ReviewDetail
+  created_at: string
+}
+
+export type NewReviewItem = Omit<ReviewItem, 'id' | 'created_at'>
+
 /** Everything the module needs from storage. Each method is one specific operation. */
 export interface PeopleStore {
   /** Distinct ids of people who own any of these identifiers (exact match). */
@@ -98,6 +125,13 @@ export interface PeopleStore {
   /** When the last Sync of this source finished reading, or null if none has. */
   getSyncedAt(source: string): Promise<string | null>
   setSyncedAt(source: string, at: string): Promise<void>
+  /** Saves a review item. There is one per (kind, key): a repeat updates its detail. */
+  saveReviewItem(item: NewReviewItem): Promise<ReviewItem>
+  /** Oldest first. */
+  openReviewItems(): Promise<ReviewItem[]>
+  getReviewItem(id: string): Promise<ReviewItem | null>
+  /** Deletes the item: once Ethan has decided, nothing about the person needs to stay here. */
+  closeReviewItems(kind: ReviewKind, key: string): Promise<void>
 }
 
 export interface PeopleDeps {
@@ -211,13 +245,26 @@ export type ResolveSuggestionResult =
   | { status: 'approved' | 'dismissed' | 'unchanged'; person: Person }
   | { status: 'not_found' }
 
+export type CloseReviewItemResult = { status: 'closed' } | { status: 'not_found' }
+
 export interface People {
+  /** For a possible_duplicate or conflict Ethan has dealt with. A suggestion is closed by resolveSuggestion. */
+  closeReviewItem(id: string): Promise<CloseReviewItemResult>
+  listReviewQueue(): Promise<{ count: number; items: ReviewItem[] }>
   /** Where a Sync of this source should start reading. */
   startSync(source: string, opts: { lookback_days: number }): Promise<{ since: string }>
   /** Record that everything up to `through` has been read. Never moves the marker backwards. */
   finishSync(source: string, through: string): Promise<{ last_synced_at: string }>
   resolveSuggestion(personId: string, decision: 'approve' | 'dismiss'): Promise<ResolveSuggestionResult>
-  suggestPeople(input: { candidates: Candidate[]; criteria: SuggestCriteria }): Promise<SuggestionResult[]>
+  /**
+   * With `queue`, everything that needs Ethan's decision is also left in the review queue, tagged
+   * with the source it came from. Without it the caller is a live conversation that asks him itself.
+   */
+  suggestPeople(input: {
+    candidates: Candidate[]
+    criteria: SuggestCriteria
+    queue?: { source: string }
+  }): Promise<SuggestionResult[]>
   upsertPerson(input: UpsertPersonInput): Promise<UpsertPersonResult>
   addInteraction(input: AddInteractionInput): Promise<AddInteractionResult>
   setFact(personId: string, key: string, value: string): Promise<SetFactResult>
@@ -313,6 +360,87 @@ export function createPeople(deps: PeopleDeps): People {
   const normalizeAll = (ids: Identifier[] = []) =>
     ids.map((i) => normalizeIdentifier(i, defaultCountryCode))
 
+  async function decideCandidate(
+    candidate: Candidate,
+    criteria: SuggestCriteria,
+  ): Promise<{ result: SuggestionResult; identifiers: Identifier[] }> {
+    const done = (result: SuggestionResult, identifiers: Identifier[] = []) => ({ result, identifiers })
+    let identifiers: Identifier[]
+    try {
+      identifiers = normalizeAll(candidate.identifiers)
+    } catch {
+      return done({ status: 'skipped', reason: 'invalid_identifier' })
+    }
+    if (await store.anyExcluded(exclusionEntries(identifiers, candidate.name))) {
+      return done({ status: 'skipped', reason: 'excluded' })
+    }
+    const owners = await store.personIdsByIdentifiers(identifiers.filter((i) => i.type !== 'alias'))
+    if (owners.length > 1) return done({ status: 'conflict', person_ids: owners }, identifiers)
+    if (owners.length === 1) {
+      const owner = await store.getPerson(owners[0])
+      if (!owner) throw new Error(`identifier points at a missing person: ${owners[0]}`)
+      if (owner.status === 'dismissed') return done({ status: 'skipped', reason: 'dismissed' })
+      await store.addIdentifiers(owner.id, identifiers)
+      return done({ status: owner.status === 'active' ? 'has_file' : 'already_suggested', person: owner }, identifiers)
+    }
+    if (criteria.ignore_no_reply && (candidate.automated || looksAutomated(identifiers))) {
+      return done({ status: 'skipped', reason: 'automated' })
+    }
+    if (candidate.sent + candidate.received < criteria.min_messages) {
+      return done({ status: 'skipped', reason: 'below_threshold' })
+    }
+    if (candidate.sent < criteria.min_each_way || candidate.received < criteria.min_each_way) {
+      return done({ status: 'skipped', reason: 'one_way' })
+    }
+    // A shared name is a hint, never proof: Ethan decides whether this is someone new.
+    const sameName = await store.peopleByName(candidate.name)
+    if (sameName.length) return done({ status: 'possible_duplicate', candidates: sameName }, identifiers)
+    const person = await store.insertPerson({ name: candidate.name.trim(), status: 'suggested' })
+    await store.addIdentifiers(person.id, identifiers)
+    return done({ status: 'suggested', person }, identifiers)
+  }
+
+  /** Leaves what only Ethan can decide in the review queue. Everything else is not his to review. */
+  async function queueForReview(
+    result: SuggestionResult,
+    candidate: Candidate,
+    identifiers: Identifier[],
+    source: string,
+  ) {
+    const seen = { source, identifiers, sent: candidate.sent, received: candidate.received }
+    const identifierKey = identifiers.map((i) => `${i.type}:${i.value}`).sort().join('|')
+    switch (result.status) {
+      case 'suggested':
+      case 'already_suggested':
+        await store.saveReviewItem({
+          kind: 'suggestion',
+          key: result.person.id,
+          person_id: result.person.id,
+          subject: result.person.name,
+          detail: seen,
+        })
+        break
+      case 'possible_duplicate':
+        await store.saveReviewItem({
+          kind: 'possible_duplicate',
+          key: identifierKey,
+          person_id: null,
+          subject: candidate.name.trim(),
+          detail: { ...seen, candidate_ids: result.candidates.map((c) => c.id) },
+        })
+        break
+      case 'conflict':
+        await store.saveReviewItem({
+          kind: 'conflict',
+          key: [...result.person_ids].sort().join('|'),
+          person_id: null,
+          subject: candidate.name.trim(),
+          detail: { ...seen, person_ids: result.person_ids },
+        })
+        break
+    }
+  }
+
   function assertSyncable(source: string) {
     if (!(SYNC_SOURCES as readonly string[]).includes(source)) {
       throw new Error(`"${source}" cannot be synced (use ${SYNC_SOURCES.join(', ')})`)
@@ -340,6 +468,8 @@ export function createPeople(deps: PeopleDeps): People {
     async resolveSuggestion(personId, decision) {
       const person = await store.getPerson(personId)
       if (!person) return { status: 'not_found' }
+      // Whatever the answer, Ethan has now looked at this person: the question is no longer open.
+      await store.closeReviewItems('suggestion', personId)
 
       // Approval also reverses a dismissal. Dismissal never demotes an approved file: forget does that.
       if (decision === 'approve' && person.status !== 'active') {
@@ -351,7 +481,7 @@ export function createPeople(deps: PeopleDeps): People {
       return { status: 'unchanged', person }
     },
 
-    async suggestPeople({ candidates, criteria }) {
+    async suggestPeople({ candidates, criteria, queue }) {
       // A missing threshold compares as false against everything, which would suggest every sender.
       for (const key of ['min_messages', 'min_each_way'] as const) {
         if (!Number.isFinite(criteria[key])) throw new Error(`${key} must be a number`)
@@ -363,56 +493,26 @@ export function createPeople(deps: PeopleDeps): People {
       }
       const results: SuggestionResult[] = []
       for (const candidate of candidates) {
-        let identifiers: Identifier[]
-        try {
-          identifiers = normalizeAll(candidate.identifiers)
-        } catch {
-          results.push({ status: 'skipped', reason: 'invalid_identifier' })
-          continue
-        }
-        if (await store.anyExcluded(exclusionEntries(identifiers, candidate.name))) {
-          results.push({ status: 'skipped', reason: 'excluded' })
-          continue
-        }
-        const owners = await store.personIdsByIdentifiers(identifiers.filter((i) => i.type !== 'alias'))
-        if (owners.length > 1) {
-          results.push({ status: 'conflict', person_ids: owners })
-          continue
-        }
-        if (owners.length === 1) {
-          const owner = await store.getPerson(owners[0])
-          if (!owner) throw new Error(`identifier points at a missing person: ${owners[0]}`)
-          if (owner.status === 'dismissed') {
-            results.push({ status: 'skipped', reason: 'dismissed' })
-            continue
-          }
-          await store.addIdentifiers(owner.id, identifiers)
-          results.push({ status: owner.status === 'active' ? 'has_file' : 'already_suggested', person: owner })
-          continue
-        }
-        if (criteria.ignore_no_reply && (candidate.automated || looksAutomated(identifiers))) {
-          results.push({ status: 'skipped', reason: 'automated' })
-          continue
-        }
-        if (candidate.sent + candidate.received < criteria.min_messages) {
-          results.push({ status: 'skipped', reason: 'below_threshold' })
-          continue
-        }
-        if (candidate.sent < criteria.min_each_way || candidate.received < criteria.min_each_way) {
-          results.push({ status: 'skipped', reason: 'one_way' })
-          continue
-        }
-        // A shared name is a hint, never proof: Ethan decides whether this is someone new.
-        const sameName = await store.peopleByName(candidate.name)
-        if (sameName.length) {
-          results.push({ status: 'possible_duplicate', candidates: sameName })
-          continue
-        }
-        const person = await store.insertPerson({ name: candidate.name.trim(), status: 'suggested' })
-        await store.addIdentifiers(person.id, identifiers)
-        results.push({ status: 'suggested', person })
+        const { result, identifiers } = await decideCandidate(candidate, criteria)
+        if (queue) await queueForReview(result, candidate, identifiers, queue.source)
+        results.push(result)
       }
       return results
+    },
+
+    async closeReviewItem(id) {
+      const item = await store.getReviewItem(id)
+      if (!item) return { status: 'not_found' }
+      if (item.kind === 'suggestion') {
+        throw new Error('a suggestion is closed by resolveSuggestion: approve or dismiss the person')
+      }
+      await store.closeReviewItems(item.kind, item.key)
+      return { status: 'closed' }
+    },
+
+    async listReviewQueue() {
+      const items = await store.openReviewItems()
+      return { count: items.length, items }
     },
 
     async upsertPerson(input) {
@@ -549,6 +649,7 @@ export function createPeople(deps: PeopleDeps): People {
       // Exclude before deleting, so the person is never re-suggested by a later sweep.
       const identifiers = await store.identifiersOf(person.id)
       await store.addExclusions(exclusionEntries(identifiers, person.name).filter((e) => e.type !== 'domain'))
+      await store.closeReviewItems('suggestion', person.id)
       await store.deletePerson(person.id)
       return { status: 'forgotten', name: person.name }
     },

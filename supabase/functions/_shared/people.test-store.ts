@@ -1,7 +1,7 @@
 /**
  * In-memory PeopleStore for tests. It enforces the same rules the database does:
  * an identifier belongs to one person, (source, source_ref) is unique, and deleting a person
- * removes their identifiers, interactions and facts. Not imported by any deployed function.
+ * removes their identifiers, interactions, facts and review items. Not imported by any deployed function.
  */
 
 import type {
@@ -10,6 +10,9 @@ import type {
   Identifier,
   Interaction,
   NewInteraction,
+  NewReviewItem,
+  ReviewItem,
+  ReviewKind,
   PeopleStore,
   Person,
   PersonFields,
@@ -28,6 +31,7 @@ export function createMemoryStore(): PeopleStore {
   const facts: Fact[] = []
   const exclusions = new Set<string>()
   const syncedAt = new Map<string, string>()
+  const reviewItems: ReviewItem[] = []
 
   return {
     async personIdsByIdentifiers(ids) {
@@ -140,6 +144,7 @@ export function createMemoryStore(): PeopleStore {
         if (interactions[n].person_id === id) interactions.splice(n, 1)
       }
       for (let n = facts.length - 1; n >= 0; n--) if (facts[n].person_id === id) facts.splice(n, 1)
+      for (let n = reviewItems.length - 1; n >= 0; n--) if (reviewItems[n].person_id === id) reviewItems.splice(n, 1)
     },
 
     async addExclusions(entries: ExclusionEntry[]) {
@@ -156,6 +161,31 @@ export function createMemoryStore(): PeopleStore {
 
     async setSyncedAt(source, at) {
       syncedAt.set(source, at)
+    },
+
+    async saveReviewItem(item: NewReviewItem) {
+      const existing = reviewItems.find((r) => r.kind === item.kind && r.key === item.key)
+      if (existing) {
+        existing.detail = item.detail
+        return existing
+      }
+      const created: ReviewItem = { ...item, id: nextId(), created_at: stamp() }
+      reviewItems.push(created)
+      return created
+    },
+
+    async openReviewItems() {
+      return [...reviewItems].sort((a, b) => a.created_at.localeCompare(b.created_at))
+    },
+
+    async getReviewItem(id) {
+      return reviewItems.find((r) => r.id === id) ?? null
+    },
+
+    async closeReviewItems(kind: ReviewKind, key: string) {
+      for (let n = reviewItems.length - 1; n >= 0; n--) {
+        if (reviewItems[n].kind === kind && reviewItems[n].key === key) reviewItems.splice(n, 1)
+      }
     },
   }
 }

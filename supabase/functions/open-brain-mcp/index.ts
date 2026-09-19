@@ -205,6 +205,7 @@ const TOOLS = [
         min_messages: { type: 'number', description: 'suggest_min_messages from parameters.md' },
         min_each_way: { type: 'number', description: 'suggest_min_each_way from parameters.md' },
         ignore_no_reply: { type: 'boolean', description: 'ignore_no_reply_senders from parameters.md' },
+        queue_source: { type: 'string', enum: ['email', 'imessage'], description: 'Set this during an unattended sweep: everything that needs Ethan\'s decision (suggestions, possible duplicates, conflicts) is also left in the review queue, tagged with this source. Leave it out when Ethan is in the conversation.' },
       },
       required: ['candidates', 'min_messages', 'min_each_way', 'ignore_no_reply'],
     },
@@ -219,6 +220,20 @@ const TOOLS = [
         decision: { type: 'string', enum: ['approve', 'dismiss'] },
       },
       required: ['person_id', 'decision'],
+    },
+  },
+  {
+    name: 'list_review_queue',
+    description: 'What a sweep left for Ethan to decide, oldest first, with a count. Kinds: "suggestion" (a new person awaiting approval: apply his answer with resolve_suggestion, which also clears it), "possible_duplicate" (same name as existing people in candidate_ids: ask whether it is the same person, act with upsert_person, then close_review_item) and "conflict" (identifiers on two files in person_ids: report it, never merge, then close_review_item once he has seen it). Call it at the start of any people run and say how many are waiting. Nothing in the queue is applied without his answer.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'close_review_item',
+    description: 'Clear a "possible_duplicate" or "conflict" item once Ethan has decided or seen it. This deletes the item. Suggestions cannot be closed here: use resolve_suggestion.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'The review item id from list_review_queue' } },
+      required: ['id'],
     },
   },
 ]
@@ -448,7 +463,12 @@ async function callTool(name: string, args: Record<string, unknown>) {
           min_each_way: Number(args.min_each_way),
           ignore_no_reply: args.ignore_no_reply !== false,
         },
+        queue: optionalString(args.queue_source) ? { source: String(args.queue_source) } : undefined,
       })
+    case 'list_review_queue':
+      return await people.listReviewQueue()
+    case 'close_review_item':
+      return await people.closeReviewItem(String(args.id ?? ''))
     case 'resolve_suggestion':
       // No default: an unrecognised decision must never be read as approval.
       if (args.decision !== 'approve' && args.decision !== 'dismiss') {
@@ -510,7 +530,7 @@ Deno.serve(async (req) => {
       return json(rpcResult(id, {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'open-brain-mcp', version: '1.2.0' },
+        serverInfo: { name: 'open-brain-mcp', version: '1.3.0' },
       }))
     }
 

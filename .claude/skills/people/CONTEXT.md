@@ -95,5 +95,9 @@ Reading new texts, email and meetings and adding Interactions for the People who
 _Avoid_: Import, refresh
 
 **Sweep**:
-A Sync that runs on a schedule instead of on request.
+A Sync that runs on a schedule instead of on request. Nobody is there to answer, so it leaves what needs Ethan's decision in the Review queue.
 _Avoid_: Job, cron
+
+**Review queue**:
+What a Sweep left for Ethan: new Suggestions, Possible duplicates and Conflicts. Each item goes when he decides it, and nothing in the queue is applied without his answer.
+_Avoid_: Inbox, backlog, to-do

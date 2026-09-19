@@ -697,3 +697,127 @@ describe('sync window', () => {
     await assert.rejects(people.startSync('note', { lookback_days: 30 }), /cannot be synced/)
   })
 })
+
+describe('review queue', () => {
+  const cand = (over: Partial<Candidate> = {}): Candidate => ({
+    name: 'Test Person',
+    identifiers: [{ type: 'email', value: 'test.person@example.com' }],
+    sent: 4,
+    received: 5,
+    ...over,
+  })
+  const sweep = (candidates: Candidate[]) =>
+    people.suggestPeople({ candidates, criteria: CRITERIA, queue: { source: 'email' } })
+
+  it('holds a new suggestion for Ethan with who, where from, and how much they wrote', async () => {
+    await sweep([cand()])
+
+    const queue = await people.listReviewQueue()
+    assert.equal(queue.count, 1)
+    const [item] = queue.items
+    assert.equal(item.kind, 'suggestion')
+    assert.equal(item.subject, 'Test Person')
+    assert.deepEqual(item.detail, {
+      source: 'email',
+      identifiers: [{ type: 'email', value: 'test.person@example.com' }],
+      sent: 4,
+      received: 5,
+    })
+  })
+
+  it('queues nothing when the caller is a live conversation that will ask for approval itself', async () => {
+    await people.suggestPeople({ candidates: [cand()], criteria: CRITERIA })
+
+    assert.equal((await people.listReviewQueue()).count, 0)
+  })
+
+  it('does not queue the same person twice; a later sweep refreshes the counts', async () => {
+    await sweep([cand()])
+    await sweep([cand({ sent: 7, received: 9 })])
+
+    const queue = await people.listReviewQueue()
+    assert.equal(queue.count, 1)
+    assert.equal(queue.items[0].detail.sent, 7)
+    assert.equal(queue.items[0].detail.received, 9)
+  })
+
+  it('queues a possible duplicate and a conflict, each once, with the people involved', async () => {
+    const a = await people.upsertPerson({ name: 'Person A', identifiers: [{ type: 'phone', value: '303-555-0101' }] })
+    const b = await people.upsertPerson({ name: 'Person B', identifiers: [{ type: 'email', value: 'b@example.com' }] })
+    const same = await people.upsertPerson({ name: 'Test Person', identifiers: [{ type: 'phone', value: '303-555-0142' }] })
+    if (a.status !== 'created' || b.status !== 'created' || same.status !== 'created') throw new Error('setup failed')
+    const conflicted = cand({
+      name: 'Person A',
+      identifiers: [{ type: 'phone', value: '303-555-0101' }, { type: 'email', value: 'b@example.com' }],
+    })
+
+    await sweep([cand(), conflicted])
+    await sweep([cand(), conflicted])
+
+    const { items } = await people.listReviewQueue()
+    assert.deepEqual(items.map((i) => i.kind).sort(), ['conflict', 'possible_duplicate'])
+    const duplicate = items.find((i) => i.kind === 'possible_duplicate')
+    const conflict = items.find((i) => i.kind === 'conflict')
+    assert.deepEqual(duplicate?.detail.candidate_ids, [same.person.id])
+    assert.deepEqual([...(conflict?.detail.person_ids ?? [])].sort(), [a.person.id, b.person.id].sort())
+  })
+
+  it('never queues someone who is skipped, already has a file, or is excluded', async () => {
+    const filed = await people.upsertPerson({ name: 'Filed Person', identifiers: [{ type: 'phone', value: '303-555-0177' }] })
+    const gone = await people.upsertPerson({ name: 'Gone Person', identifiers: [{ type: 'phone', value: '303-555-0199' }] })
+    if (filed.status !== 'created' || gone.status !== 'created') throw new Error('setup failed')
+    await people.forgetPerson(gone.person.id, { confirm: true })
+    const [dismissedResult] = await sweep([cand({ name: 'Turned Down', identifiers: [{ type: 'phone', value: '303-555-0155' }] })])
+    if (dismissedResult.status !== 'suggested') throw new Error('setup failed')
+    await people.resolveSuggestion(dismissedResult.person.id, 'dismiss')
+
+    await sweep([
+      cand({ name: 'Filed Person', identifiers: [{ type: 'phone', value: '303-555-0177' }] }),
+      cand({ name: 'Gone Person', identifiers: [{ type: 'phone', value: '303-555-0199' }] }),
+      cand({ name: 'Turned Down', identifiers: [{ type: 'phone', value: '303-555-0155' }] }),
+      cand({ name: 'Quiet', identifiers: [{ type: 'phone', value: '303-555-0166' }], sent: 1, received: 1 }),
+      cand({ name: 'Shop', identifiers: [{ type: 'email', value: 'noreply@shop.example.com' }] }),
+    ])
+
+    assert.equal((await people.listReviewQueue()).count, 0)
+  })
+
+  it('approving or dismissing a suggestion takes it off the queue', async () => {
+    const [a, b] = await sweep([
+      cand({ name: 'Person A', identifiers: [{ type: 'phone', value: '303-555-0101' }] }),
+      cand({ name: 'Person B', identifiers: [{ type: 'phone', value: '303-555-0102' }] }),
+    ])
+    if (a.status !== 'suggested' || b.status !== 'suggested') throw new Error('setup failed')
+    assert.equal((await people.listReviewQueue()).count, 2)
+
+    await people.resolveSuggestion(a.person.id, 'approve')
+    await people.resolveSuggestion(b.person.id, 'dismiss')
+
+    assert.equal((await people.listReviewQueue()).count, 0)
+  })
+
+  it('forgetting a suggested person takes them off the queue', async () => {
+    const [a] = await sweep([cand()])
+    if (a.status !== 'suggested') throw new Error('setup failed')
+
+    await people.forgetPerson(a.person.id, { confirm: true })
+
+    assert.equal((await people.listReviewQueue()).count, 0)
+  })
+
+  it('closing a duplicate or conflict once Ethan has decided; suggestions must be approved or dismissed instead', async () => {
+    const a = await people.upsertPerson({ name: 'Test Person', identifiers: [{ type: 'phone', value: '303-555-0142' }] })
+    if (a.status !== 'created') throw new Error('setup failed')
+    const [dup] = await sweep([cand()]).then(() => people.listReviewQueue()).then((q) => q.items)
+    const [pending] = await sweep([cand({ name: 'Someone New', identifiers: [{ type: 'phone', value: '303-555-0188' }] })])
+      .then(() => people.listReviewQueue())
+      .then((q) => q.items.filter((i) => i.kind === 'suggestion'))
+
+    await assert.rejects(people.closeReviewItem(pending.id), /approve or dismiss/)
+    assert.deepEqual(await people.closeReviewItem(dup.id), { status: 'closed' })
+    assert.deepEqual(await people.closeReviewItem('missing'), { status: 'not_found' })
+
+    const left = await people.listReviewQueue()
+    assert.deepEqual(left.items.map((i) => i.id), [pending.id])
+  })
+})

@@ -15,7 +15,7 @@ This file is committed to a public repo. It never holds names, phone numbers, em
 | `ignore_no_reply_senders` | true | Never suggest no-reply, marketing or automated senders. |
 | `sync_lookback_days` | 30 | How far back the first Sync reads. |
 | `gmail_query` | `(in:inbox OR in:sent) -category:promotions -category:updates -category:social -category:forums` | Which Gmail a Sync reads: Inbox and Sent, without bulk categories. `after:` is added from the last Sync. |
-| `sweep_schedule` | daily, 07:00 | Milestone 3. When the scheduled Sweep runs. Not active yet. |
+| `sweep_schedule` | daily, 07:00 | When the scheduled Sweep runs. Off until manual runs look right. |
 
 ## Sources
 

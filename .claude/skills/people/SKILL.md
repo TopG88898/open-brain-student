@@ -1,11 +1,11 @@
 ---
 name: people
-description: Keep a private file on the people Ethan deals with. Use when he asks to add a note about a person, correct something about them, look someone up ("what do I know about Sarah?"), set a follow-up, forget someone, or sync his texts or email into their files.
+description: Keep a private file on the people Ethan deals with. Use when he asks to add a note about a person, correct something about them, look someone up ("what do I know about Sarah?"), set a follow-up, forget someone, sync his texts or email into their files, review the people queue, or run a sweep.
 ---
 
-Files live in Supabase and are reached through the `open-brain` MCP tools: `upsert_person`, `add_interaction`, `set_fact`, `get_person`, `search_people`, `forget_person`, `start_sync`, `finish_sync`, `suggest_people`, `resolve_suggestion`. Terms are defined in [CONTEXT.md](CONTEXT.md). Settings are in [parameters.md](parameters.md): read it first every run.
+Files live in Supabase and are reached through the `open-brain` MCP tools: `upsert_person`, `add_interaction`, `set_fact`, `get_person`, `search_people`, `forget_person`, `start_sync`, `finish_sync`, `suggest_people`, `resolve_suggestion`, `list_review_queue`, `close_review_item`. Terms are defined in [CONTEXT.md](CONTEXT.md). Settings are in [parameters.md](parameters.md): read it first every run.
 
-Notes, lookups, and manual syncs of texts and email work today. If asked to sync meetings or Telegram, or to run a sweep, say those are not built yet (Milestone 3).
+Notes, lookups, manual syncs of texts and email, the review queue and sweeps of texts and email work today. If asked to sync meetings or Telegram, say those are not built yet (Milestone 3).
 
 ## Adding a note
 
@@ -49,6 +49,28 @@ One source per run: `email` (Gmail connector) or `imessage` (iMessage connector)
 5. Show one numbered batch: each `suggested` and `already_suggested` person with name, identifier, `sent` and `received`, and a one-line reason they cleared the threshold. List each `possible_duplicate` (ask whether it is the same person) and each `conflict` (report, never merge). Give skipped people as counts by reason, without names. Say nothing at all about `excluded`.
 6. Apply his answer with `resolve_suggestion`, one call per person. For each approved person, read their messages from this scan and add Interactions as in step 4. A person approved in a later session has no Interactions yet: read their messages back `sync_lookback_days` and add them the same way.
 7. Call `finish_sync` with `T`, once steps 4 to 6 succeeded. A sync that failed midway is retried from the same `since`: `source_ref` makes the repeat safe.
+
+## Reviewing the queue
+
+Start every run by calling `list_review_queue`. When something is waiting, say how many items, once, and carry on with what he asked. When he asks to review:
+
+1. Show one numbered batch as in Syncing step 5: each `suggestion` with source, `sent` and `received`; each `possible_duplicate` with the candidates from `candidate_ids` (`get_person` each); each `conflict` with the people in `person_ids`.
+2. Apply his answers:
+   - `suggestion`: `resolve_suggestion`, which also clears the item. For each approved person, read their messages back `sync_lookback_days` and add Interactions as in Syncing step 4.
+   - `possible_duplicate`: same person, then `upsert_person` with that candidate's `id` and the identifiers from `detail`; different person, then `upsert_person` with `confirm_new`. Then `close_review_item`.
+   - `conflict`: report it and never merge. `close_review_item` once he has seen it.
+
+## Running a Sweep
+
+A Sweep is a Sync that runs while Ethan is away, so nobody can answer a question. Decide everything the rules decide and leave the rest in the review queue. The sweep is done when both sources have been tried and the summary is written.
+
+For `email`, then `imessage`, follow Syncing steps 1 to 4 and 7, with these changes:
+
+- Step 3: pass `queue_source` (the source name) to `suggest_people`. That is what puts suggestions, possible duplicates and conflicts in the queue.
+- Steps 5 and 6 do not run. Nothing is shown to anyone, and no call to `resolve_suggestion`, `close_review_item` or `upsert_person` with `confirm_new` is made.
+- A source that fails midway is left without `finish_sync`, so the next sweep retries from the same `since`. Carry on with the other source.
+
+Finish with a summary of counts only: per source, Interactions added, items now in the queue, people skipped by reason, and errors. Names and message text stay out of it.
 
 ## Boundaries
 
