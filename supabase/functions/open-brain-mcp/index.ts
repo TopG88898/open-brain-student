@@ -234,12 +234,12 @@ const TOOLS = [
   },
   {
     name: 'list_review_queue',
-    description: 'What a sweep left for Ethan to decide, oldest first, with a count. Kinds: "suggestion" (a new person awaiting approval: apply his answer with resolve_suggestion, which also clears it), "possible_duplicate" (same name as existing people in candidate_ids: ask whether it is the same person, act with upsert_person, then close_review_item) and "conflict" (identifiers on two files in person_ids: report it, never merge, then close_review_item once he has seen it). Call it at the start of any people run and say how many are waiting. Nothing in the queue is applied without his answer.',
+    description: 'What a sweep left for Ethan to decide, oldest first, with a count. Kinds: "suggestion" (a new person awaiting approval: apply his answer with resolve_suggestion, which also clears it), "possible_duplicate" (same name as existing people in candidate_ids: ask whether it is the same person, act with upsert_person, then close_review_item) "conflict" (identifiers on two files in person_ids: report it, never merge, then close_review_item once he has seen it) and "unmatched_note" (a note he dictated in Telegram that could not be filed by name: detail.note is his text, detail.reason is no_match, ambiguous or not_approved, detail.candidate_ids are the people with that name; once he says whose file it belongs on, add it with add_interaction source "note", occurred_at from detail and source_ref the item\'s key, then close_review_item). Call it at the start of any people run and say how many are waiting. Nothing in the queue is applied without his answer.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'close_review_item',
-    description: 'Clear a "possible_duplicate" or "conflict" item once Ethan has decided or seen it. This deletes the item. Suggestions cannot be closed here: use resolve_suggestion.',
+    description: 'Clear a "possible_duplicate", "conflict" or "unmatched_note" item once Ethan has decided or seen it. This deletes the item. Suggestions cannot be closed here: use resolve_suggestion.',
     inputSchema: {
       type: 'object',
       properties: { id: { type: 'string', description: 'The review item id from list_review_queue' } },
@@ -541,7 +541,7 @@ Deno.serve(async (req) => {
       return json(rpcResult(id, {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'open-brain-mcp', version: '1.4.0' },
+        serverInfo: { name: 'open-brain-mcp', version: '1.5.0' },
       }))
     }
 

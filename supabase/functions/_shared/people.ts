@@ -73,7 +73,10 @@ export interface Fact {
 }
 
 /** What needs Ethan's decision. A Sweep leaves these for him instead of asking. */
-export type ReviewKind = 'suggestion' | 'possible_duplicate' | 'conflict'
+export type ReviewKind = 'suggestion' | 'possible_duplicate' | 'conflict' | 'unmatched_note'
+
+/** Why a dictated note could not be filed on its own. */
+export type UnmatchedNoteReason = 'no_match' | 'ambiguous' | 'not_approved'
 
 export interface ReviewDetail {
   source: string
@@ -85,6 +88,10 @@ export interface ReviewDetail {
   candidate_ids?: string[]
   /** conflict: the existing people who each own one of the identifiers. */
   person_ids?: string[]
+  /** unmatched_note: what Ethan dictated, when, and why it was not filed. */
+  note?: string
+  occurred_at?: string
+  reason?: UnmatchedNoteReason
 }
 
 export interface ReviewItem {
@@ -255,8 +262,30 @@ export type ResolveSuggestionResult =
 
 export type CloseReviewItemResult = { status: 'closed' } | { status: 'not_found' }
 
+export interface RecordNoteInput {
+  /** Who the note is about, as Ethan wrote it: matched to a Person's name or a name alias. */
+  name: string
+  note: string
+  /** Identifies the message, so a redelivery is not filed or queued twice. */
+  source_ref: string
+  occurred_at?: string
+  embedding?: number[]
+}
+
+export type RecordNoteResult =
+  | { status: 'added'; person: Person; interaction: Interaction }
+  | { status: 'duplicate' }
+  | { status: 'queued'; reason: UnmatchedNoteReason; item: ReviewItem }
+  | { status: 'excluded' }
+
 export interface People {
-  /** For a possible_duplicate or conflict Ethan has dealt with. A suggestion is closed by resolveSuggestion. */
+  /**
+   * Files a dictated note on the one approved Person it names. Anyone else (no file, several,
+   * not yet approved) leaves the note in the review queue for Ethan, and a forgotten Person's
+   * note is dropped.
+   */
+  recordNote(input: RecordNoteInput): Promise<RecordNoteResult>
+  /** For a possible_duplicate, conflict or unmatched_note Ethan has dealt with. A suggestion is closed by resolveSuggestion. */
   closeReviewItem(id: string): Promise<CloseReviewItemResult>
   listReviewQueue(): Promise<{ count: number; items: ReviewItem[] }>
   /** Where a Sync of this source should start reading. */
@@ -467,6 +496,38 @@ export function createPeople(deps: PeopleDeps): People {
     }
   }
 
+  const addInteraction: People['addInteraction'] = async (input) => {
+    if (!(INTERACTION_SOURCES as readonly string[]).includes(input.source)) {
+      throw new Error(`invalid source "${input.source}" (use ${INTERACTION_SOURCES.join(', ')})`)
+    }
+    const summary = input.summary.trim()
+    if (!summary) throw new Error('summary is required')
+    const person = await store.getPerson(input.person_id)
+    if (!person) throw new Error(`no such person: ${input.person_id}`)
+    if (person.status !== 'active') {
+      throw new Error(`${person.name} is ${person.status}, not approved: approve them before adding to their file`)
+    }
+
+    const occurredAt = new Date(input.occurred_at ?? now().toISOString()).toISOString()
+    const interaction = await store.insertInteraction({
+      person_id: person.id,
+      source: input.source,
+      occurred_at: occurredAt,
+      summary,
+      direction: input.direction ?? null,
+      source_ref: input.source_ref ?? null,
+      embedding: input.embedding ?? null,
+    })
+    if (!interaction) return { status: 'duplicate' }
+
+    // A note is something you wrote about them, not something they did: it is not contact.
+    const isContact = input.source !== 'note'
+    const isNewest = !person.last_contact_at || new Date(occurredAt) > new Date(person.last_contact_at)
+    if (isContact && isNewest) await store.updatePerson(person.id, { last_contact_at: occurredAt })
+
+    return { status: 'added', interaction }
+  }
+
   return {
     async startSync(source, { lookback_days }) {
       assertSyncable(source)
@@ -539,6 +600,48 @@ export function createPeople(deps: PeopleDeps): People {
       }
       await store.closeReviewItems(item.kind, item.key)
       return { status: 'closed' }
+    },
+
+    async recordNote(input) {
+      const name = input.name.trim()
+      const note = input.note.trim()
+      if (!name) throw new Error('name is required')
+      if (!note) throw new Error('note is required')
+
+      if (await store.anyExcluded([{ type: 'alias', value: name.toLowerCase() }])) return { status: 'excluded' }
+
+      const matches = await store.peopleByName(name)
+      const approved = matches.filter((p) => p.status === 'active')
+      if (approved.length === 1) {
+        const added = await addInteraction({
+          person_id: approved[0].id,
+          source: 'note',
+          summary: note,
+          occurred_at: input.occurred_at,
+          source_ref: input.source_ref,
+          embedding: input.embedding,
+        })
+        return added.status === 'added'
+          ? { status: 'added', person: approved[0], interaction: added.interaction }
+          : { status: 'duplicate' }
+      }
+
+      const reason: UnmatchedNoteReason = approved.length > 1 ? 'ambiguous' : matches.length ? 'not_approved' : 'no_match'
+      const item = await store.saveReviewItem({
+        kind: 'unmatched_note',
+        key: input.source_ref,
+        person_id: null,
+        subject: name,
+        detail: {
+          source: 'telegram',
+          identifiers: [],
+          note,
+          occurred_at: new Date(input.occurred_at ?? now().toISOString()).toISOString(),
+          reason,
+          ...(matches.length ? { candidate_ids: matches.map((p) => p.id) } : {}),
+        },
+      })
+      return { status: 'queued', reason, item }
     },
 
     async listReviewQueue() {
@@ -622,37 +725,7 @@ export function createPeople(deps: PeopleDeps): People {
       }
     },
 
-    async addInteraction(input) {
-      if (!(INTERACTION_SOURCES as readonly string[]).includes(input.source)) {
-        throw new Error(`invalid source "${input.source}" (use ${INTERACTION_SOURCES.join(', ')})`)
-      }
-      const summary = input.summary.trim()
-      if (!summary) throw new Error('summary is required')
-      const person = await store.getPerson(input.person_id)
-      if (!person) throw new Error(`no such person: ${input.person_id}`)
-      if (person.status !== 'active') {
-        throw new Error(`${person.name} is ${person.status}, not approved: approve them before adding to their file`)
-      }
-
-      const occurredAt = new Date(input.occurred_at ?? now().toISOString()).toISOString()
-      const interaction = await store.insertInteraction({
-        person_id: person.id,
-        source: input.source,
-        occurred_at: occurredAt,
-        summary,
-        direction: input.direction ?? null,
-        source_ref: input.source_ref ?? null,
-        embedding: input.embedding ?? null,
-      })
-      if (!interaction) return { status: 'duplicate' }
-
-      // A note is something you wrote about them, not something they did: it is not contact.
-      const isContact = input.source !== 'note'
-      const isNewest = !person.last_contact_at || new Date(occurredAt) > new Date(person.last_contact_at)
-      if (isContact && isNewest) await store.updatePerson(person.id, { last_contact_at: occurredAt })
-
-      return { status: 'added', interaction }
-    },
+    addInteraction,
 
     async setFact(personId, key, value) {
       const cleanKey = key.trim().toLowerCase()

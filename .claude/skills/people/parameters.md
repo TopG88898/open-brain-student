@@ -27,4 +27,6 @@ This file is committed to a public repo. It never holds names, phone numbers, em
 | `imessage` | Active (manual Sync) |
 | `email` | Active (manual Sync) |
 | `meeting` | Active (Granola and Calendar) |
-| `telegram` | Milestone 3 |
+| `telegram` | Active for dictated notes only (`@Name note`); chats are never read |
+
+The bot's own sensitive-topic check (`supabase/functions/_shared/telegram-note.ts`) mirrors `avoid_topics` as word stems. Change both together.

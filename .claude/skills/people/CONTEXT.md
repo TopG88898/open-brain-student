@@ -78,6 +78,10 @@ _Avoid_: Match, conflict
 Identifiers that belong to two different existing Persons, which would require merging them. It is reported and never resolved automatically.
 _Avoid_: Duplicate
 
+**Unmatched note**:
+A Note Ethan dictated in Telegram that the bot could not file on exactly one approved Person: no File has that name, several do, or the Person is not approved yet. It waits in the Review queue with his words, and is filed once he says whose it is.
+_Avoid_: Orphan note, pending note
+
 ## Keeping people out
 
 **Exclusion**:
@@ -103,5 +107,5 @@ A Sync that runs on a schedule instead of on request. Nobody is there to answer,
 _Avoid_: Job, cron
 
 **Review queue**:
-What a Sweep left for Ethan: new Suggestions, Possible duplicates and Conflicts. Each item goes when he decides it, and nothing in the queue is applied without his answer.
+What a Sweep or the Telegram bot left for Ethan: new Suggestions, Possible duplicates, Conflicts and Unmatched notes. Each item goes when he decides it, and nothing in the queue is applied without his answer.
 _Avoid_: Inbox, backlog, to-do

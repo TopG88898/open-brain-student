@@ -5,7 +5,7 @@ description: Keep a private file on the people Ethan deals with. Use when he ask
 
 Files live in Supabase and are reached through the `open-brain` MCP tools: `upsert_person`, `add_interaction`, `set_fact`, `get_person`, `search_people`, `forget_person`, `start_sync`, `finish_sync`, `suggest_people`, `resolve_suggestion`, `list_review_queue`, `close_review_item`. Terms are defined in [CONTEXT.md](CONTEXT.md). Settings are in [parameters.md](parameters.md): read it first every run.
 
-Notes, lookups, manual syncs of texts, email and meetings, the review queue and sweeps work today. If asked to read Telegram, say it is not built yet (Milestone 3c).
+Notes, lookups, manual syncs of texts, email and meetings, the review queue, sweeps and notes dictated in Telegram all work today. Telegram is a way for Ethan to dictate notes to the bot, not a source to read: there is no connector for other people's chats, so if asked to read them, say so.
 
 ## Adding a note
 
@@ -16,6 +16,8 @@ Notes, lookups, manual syncs of texts, email and meetings, the review queue and 
 2. Write the summary yourself: one or two factual sentences of what he told you. Leave out any topic in `avoid_topics`. If the whole note is about a sensitive topic, do not save it and tell him why.
 3. `add_interaction` with source `note`, passing `profile_max_words` and `avoid_topics` from parameters.md. Tell him the Profile changed.
 4. If he asked for a follow-up, call `upsert_person` with `id`, `follow_up_at` and `follow_up_note`. With no date given, use `default_follow_up_days`.
+
+He can also dictate a note to the Telegram bot: `@Sarah moved to Denver`, or `@Sarah Chen: moved to Denver` for a name with spaces. The bot files it on the one approved Person with that name or alias. It adds no Fact and does not refresh the Profile, so do both when he next asks about that Person. A note it cannot file waits in the review queue as an `unmatched_note` (see Reviewing the queue). It refuses a note that touches an `avoid_topics` subject, and Telegram messages without `@` stay plain thoughts.
 
 Save a Fact with `set_fact` when he states one plainly ("she works at Acme"). Do not turn guesses into Facts.
 
@@ -70,11 +72,12 @@ Source `meeting` reads Granola and Calendar together. The sync is done when the 
 
 Start every run by calling `list_review_queue`. When something is waiting, say how many items, once, and carry on with what he asked. When he asks to review:
 
-1. Show one numbered batch as in Syncing step 5: each `suggestion` with source, `sent` and `received`; each `possible_duplicate` with the candidates from `candidate_ids` (`get_person` each); each `conflict` with the people in `person_ids`.
+1. Show one numbered batch as in Syncing step 5: each `suggestion` with source, `sent` and `received`; each `possible_duplicate` with the candidates from `candidate_ids` (`get_person` each); each `conflict` with the people in `person_ids`; each `unmatched_note` with the name he wrote, the note itself (`detail.note`), the date and the reason (`detail.reason`), plus the people in `candidate_ids`.
 2. Apply his answers:
    - `suggestion`: `resolve_suggestion`, which also clears the item. For each approved person, read their messages or meetings back `sync_lookback_days` and add Interactions as in Syncing step 4 or Syncing meetings step 5.
    - `possible_duplicate`: same person, then `upsert_person` with that candidate's `id` and the identifiers from `detail`; different person, then `upsert_person` with `confirm_new`. Then `close_review_item`.
    - `conflict`: report it and never merge. `close_review_item` once he has seen it.
+   - `unmatched_note`: ask whose File it belongs on, or whether to drop it. `no_match`: he may mean an existing Person under another name (then `upsert_person` with that `id` and the name as an `alias` Identifier, so it matches next time) or someone new (then `upsert_person` with the name). `ambiguous`: ask which of `candidate_ids`. `not_approved`: `resolve_suggestion` approve first, if he agrees. Then `add_interaction` with source `note`, `summary` his note in the same words unless it touches an `avoid_topics` subject, `occurred_at` from `detail`, and `source_ref` the item's `key`. `close_review_item` after that, or straight away if he drops it.
 
 ## Running a Sweep
 

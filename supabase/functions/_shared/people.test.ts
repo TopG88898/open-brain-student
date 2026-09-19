@@ -892,3 +892,151 @@ describe('suggestPeople from meetings', () => {
     )
   })
 })
+
+describe('recordNote', () => {
+  const note = (over: Partial<Parameters<People['recordNote']>[0]> = {}) => ({
+    name: 'Test Person',
+    note: 'moved to Denver',
+    source_ref: 'telegram:1:10',
+    ...over,
+  })
+  const activePerson = async (name = 'Test Person') => {
+    const created = await people.upsertPerson({ name })
+    if (created.status !== 'created') throw new Error('setup failed')
+    return created.person
+  }
+
+  it('adds a Note to the file of the one approved person with that name', async () => {
+    const person = await activePerson()
+
+    const result = await people.recordNote(note())
+
+    assert.equal(result.status === 'added' && result.person.id, person.id)
+    const found = await people.getPerson({ id: person.id })
+    if (found.status !== 'found') throw new Error('lookup failed')
+    assert.equal(found.interactions.length, 1)
+    assert.equal(found.interactions[0].source, 'note')
+    assert.equal(found.interactions[0].summary, 'moved to Denver')
+  })
+
+  it('matches the name ignoring case and a second name saved as an alias', async () => {
+    const person = await activePerson('Sarah Chen')
+    await people.upsertPerson({ id: person.id, identifiers: [{ type: 'alias', value: 'Sar' }] })
+
+    const byName = await people.recordNote(note({ name: 'sarah CHEN', source_ref: 'telegram:1:1' }))
+    const byAlias = await people.recordNote(note({ name: 'Sar', source_ref: 'telegram:1:2' }))
+
+    assert.equal(byName.status, 'added')
+    assert.equal(byAlias.status, 'added')
+  })
+
+  it('is not contact: a Note leaves Last contact alone', async () => {
+    const person = await activePerson()
+
+    await people.recordNote(note())
+
+    const found = await people.getPerson({ id: person.id })
+    assert.equal(found.status === 'found' && found.person.last_contact_at, null)
+  })
+
+  it('saves the same message once, however many times Telegram delivers it', async () => {
+    await activePerson()
+
+    const first = await people.recordNote(note())
+    const again = await people.recordNote(note())
+
+    assert.equal(first.status, 'added')
+    assert.deepEqual(again, { status: 'duplicate' })
+  })
+
+  it('files the note under the time it was written, not the time it was recorded', async () => {
+    const person = await activePerson()
+
+    await people.recordNote(note({ occurred_at: '2026-09-17T08:30:00Z' }))
+
+    const found = await people.getPerson({ id: person.id })
+    assert.equal(found.status === 'found' && found.interactions[0].occurred_at, '2026-09-17T08:30:00.000Z')
+  })
+
+  it('queues a note for someone with no file, keeping the note and saving it on nobody', async () => {
+    const result = await people.recordNote(note({ name: 'Nobody Known' }))
+
+    assert.equal(result.status === 'queued' && result.reason, 'no_match')
+    const { count, items } = await people.listReviewQueue()
+    assert.equal(count, 1)
+    assert.equal(items[0].kind, 'unmatched_note')
+    assert.equal(items[0].subject, 'Nobody Known')
+    assert.equal(items[0].detail.note, 'moved to Denver')
+    assert.equal(items[0].detail.source, 'telegram')
+    assert.equal(items[0].person_id, null)
+  })
+
+  it('queues a note when two approved people share the name, and names both', async () => {
+    const a = await activePerson('Sarah Miller')
+    const b = await people.upsertPerson({ name: 'Sarah Miller', confirm_new: true })
+    if (b.status !== 'created') throw new Error('setup failed')
+
+    const result = await people.recordNote(note({ name: 'Sarah Miller' }))
+
+    assert.equal(result.status === 'queued' && result.reason, 'ambiguous')
+    const [item] = (await people.listReviewQueue()).items
+    assert.deepEqual([...(item.detail.candidate_ids ?? [])].sort(), [a.id, b.person.id].sort())
+  })
+
+  it('queues a note for someone still awaiting approval instead of giving them a file', async () => {
+    const [suggested] = await people.suggestPeople({
+      candidates: [{ name: 'Test Person', identifiers: [{ type: 'email', value: 'tp@example.com' }], sent: 5, received: 5 }],
+      criteria: { min_messages: 6, min_each_way: 2, ignore_no_reply: true },
+    })
+    if (suggested.status !== 'suggested') throw new Error('setup failed')
+
+    const result = await people.recordNote(note())
+
+    assert.equal(result.status === 'queued' && result.reason, 'not_approved')
+    const found = await people.getPerson({ id: suggested.person.id })
+    assert.equal(found.status === 'found' && found.interactions.length, 0)
+  })
+
+  it('files the note on the approved person when a same-name person is only a suggestion', async () => {
+    const approved = await activePerson()
+    await people.suggestPeople({
+      candidates: [{ name: 'Test Person', identifiers: [{ type: 'email', value: 'tp@example.com' }], sent: 5, received: 5 }],
+      criteria: { min_messages: 6, min_each_way: 2, ignore_no_reply: true },
+    })
+
+    const result = await people.recordNote(note())
+
+    assert.equal(result.status === 'added' && result.person.id, approved.id)
+  })
+
+  it('drops a note about someone Ethan asked to forget, without queueing it', async () => {
+    const person = await activePerson()
+    await people.forgetPerson(person.id, { confirm: true })
+
+    const result = await people.recordNote(note())
+
+    assert.deepEqual(result, { status: 'excluded' })
+    assert.equal((await people.listReviewQueue()).count, 0)
+  })
+
+  it('keeps one queue item per message, so a redelivered message is not queued twice', async () => {
+    await people.recordNote(note({ name: 'Nobody Known' }))
+    await people.recordNote(note({ name: 'Nobody Known' }))
+    await people.recordNote(note({ name: 'Nobody Known', source_ref: 'telegram:1:11' }))
+
+    assert.equal((await people.listReviewQueue()).count, 2)
+  })
+
+  it('lets Ethan close a queued note once he has dealt with it', async () => {
+    await people.recordNote(note({ name: 'Nobody Known' }))
+    const [item] = (await people.listReviewQueue()).items
+
+    assert.deepEqual(await people.closeReviewItem(item.id), { status: 'closed' })
+    assert.equal((await people.listReviewQueue()).count, 0)
+  })
+
+  it('refuses an empty note or name', async () => {
+    await assert.rejects(people.recordNote(note({ note: '   ' })), /note is required/)
+    await assert.rejects(people.recordNote(note({ name: ' ' })), /name is required/)
+  })
+})
