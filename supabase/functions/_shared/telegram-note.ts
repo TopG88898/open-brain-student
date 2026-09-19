@@ -50,6 +50,14 @@ export function touchesSensitiveTopic(text: string): boolean {
   return SENSITIVE.test(text)
 }
 
+/** The topics in parameters.md `avoid_topics`, named in the refusal. Keep in step with the stems above. */
+export const SENSITIVE_TOPICS = ['health', 'medical', 'legal', 'financial', 'religion']
+
+export function sensitiveTopicRefusal(): string {
+  const named = `${SENSITIVE_TOPICS.slice(0, -1).join(', ')} or ${SENSITIVE_TOPICS[SENSITIVE_TOPICS.length - 1]}`
+  return `Not saved: it touches a sensitive topic (${named}).`
+}
+
 export interface CallerCheck {
   chatId: number | undefined
   /** The X-Telegram-Bot-Api-Secret-Token header, if Telegram sent one. */

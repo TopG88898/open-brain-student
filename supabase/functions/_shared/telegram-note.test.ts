@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { isFromEthan, parsePersonNote, touchesSensitiveTopic } from './telegram-note.ts'
+import {
+  isFromEthan,
+  parsePersonNote,
+  SENSITIVE_TOPICS,
+  sensitiveTopicRefusal,
+  touchesSensitiveTopic,
+} from './telegram-note.ts'
 
 describe('parsePersonNote', () => {
   it('reads "@Name note" as a note about a one-word name', () => {
@@ -73,6 +79,15 @@ describe('touchesSensitiveTopic', () => {
     ]) {
       assert.equal(touchesSensitiveTopic(text), false, text)
     }
+  })
+})
+
+describe('sensitiveTopicRefusal', () => {
+  it('names every sensitive topic, so the refusal never lags behind the list', () => {
+    const message = sensitiveTopicRefusal()
+    for (const topic of SENSITIVE_TOPICS) assert.match(message, new RegExp(topic))
+    assert.match(message, /religion/)
+    assert.match(message, /^Not saved: /)
   })
 })
 

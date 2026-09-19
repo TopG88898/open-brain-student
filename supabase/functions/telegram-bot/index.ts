@@ -8,7 +8,7 @@
 
 import { createPeople } from '../_shared/people.ts'
 import { createRestPeopleStore } from '../_shared/people-store.ts'
-import { isFromEthan, parsePersonNote, touchesSensitiveTopic } from '../_shared/telegram-note.ts'
+import { isFromEthan, parsePersonNote, sensitiveTopicRefusal, touchesSensitiveTopic } from '../_shared/telegram-note.ts'
 
 const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN')!
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
@@ -90,7 +90,7 @@ async function replyToPersonNote(
   message: { message_id: number; date?: number; chat: { id: number } },
 ): Promise<string> {
   if (touchesSensitiveTopic(note)) {
-    return 'Not saved: it touches a sensitive topic (health, medical, legal or financial).'
+    return sensitiveTopicRefusal()
   }
   const result = await people.recordNote({
     name,
