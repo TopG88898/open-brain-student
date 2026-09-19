@@ -63,8 +63,12 @@ A Suggestion Ethan turned down. It is remembered so it is never suggested again,
 _Avoid_: Rejected, blocked, ignored
 
 **Relevance threshold**:
-The minimum amount of two-way communication before someone is worth suggesting.
+The minimum amount of two-way communication before someone is worth suggesting: messages sent each way, or one-on-one meetings.
 _Avoid_: Score, priority
+
+**One-on-one**:
+A meeting with only Ethan and one other Person. Attending one makes someone worth suggesting; a group meeting alone does not.
+_Avoid_: 1:1 meeting, catch-up
 
 **Possible duplicate**:
 A new Person whose name matches an existing Person but who shares no Identifier with them. It is never merged automatically; Ethan decides.

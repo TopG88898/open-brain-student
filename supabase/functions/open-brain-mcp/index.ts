@@ -153,11 +153,11 @@ const TOOLS = [
   },
   {
     name: 'start_sync',
-    description: 'Begin a sync of one source ("email" or "imessage"). Returns "since": read messages from that time forward. It is where the last finished sync stopped, or "lookback_days" ago on the first sync. Note the current time BEFORE reading and pass it to finish_sync afterwards, so messages that arrive while you read are not missed (duplicates are harmless: source_ref dedups them).',
+    description: 'Begin a sync of one source ("email", "imessage" or "meeting"). Returns "since": read messages from that time forward. It is where the last finished sync stopped, or "lookback_days" ago on the first sync. Note the current time BEFORE reading and pass it to finish_sync afterwards, so messages that arrive while you read are not missed (duplicates are harmless: source_ref dedups them).',
     inputSchema: {
       type: 'object',
       properties: {
-        source: { type: 'string', enum: ['email', 'imessage'] },
+        source: { type: 'string', enum: ['email', 'imessage', 'meeting'] },
         lookback_days: { type: 'number', description: 'How far back the first sync reads, from parameters.md' },
       },
       required: ['source', 'lookback_days'],
@@ -169,7 +169,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        source: { type: 'string', enum: ['email', 'imessage'] },
+        source: { type: 'string', enum: ['email', 'imessage', 'meeting'] },
         through: { type: 'string', description: 'ISO 8601 time the sync started reading' },
       },
       required: ['source', 'through'],
@@ -177,7 +177,7 @@ const TOOLS = [
   },
   {
     name: 'suggest_people',
-    description: 'Decide who from a scan of texts or email is worth a file. Pass one candidate per person (group by identifier) with how many messages Ethan sent them and they sent Ethan, and the thresholds from parameters.md. Returns one result per candidate, in order: "suggested" (new, awaiting approval), "already_suggested" (still awaiting approval), "has_file" (already approved: add their interactions), "skipped" with a reason (below_threshold, one_way, automated, excluded, dismissed, invalid_identifier: say nothing about excluded people), "possible_duplicate" (same name as an existing person: ask Ethan) or "conflict" (identifiers on two files: report it, never merge). Nothing here sends, replies to or labels any message. Suggested people get no file until resolve_suggestion approves them.',
+    description: 'Decide who from a scan of texts or email is worth a file. Pass one candidate per person (group by identifier). From texts or email give "sent" and "received" (messages Ethan sent them and they sent Ethan) plus min_messages and min_each_way. From meetings give "meetings" ({ one_on_one, group }) plus min_one_on_one_meetings; set "automated" for rooms and note-taker bots. Thresholds come from parameters.md. Returns one result per candidate, in order: "suggested" (new, awaiting approval), "already_suggested" (still awaiting approval), "has_file" (already approved: add their interactions), "skipped" with a reason (below_threshold, one_way, automated, excluded, dismissed, invalid_identifier: say nothing about excluded people), "possible_duplicate" (same name as an existing person: ask Ethan) or "conflict" (identifiers on two files: report it, never merge). Nothing here sends, replies to or labels any message. Suggested people get no file until resolve_suggestion approves them.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -195,19 +195,29 @@ const TOOLS = [
                   required: ['type', 'value'],
                 },
               },
-              sent: { type: 'number', description: 'Messages Ethan sent this person in the scanned window' },
-              received: { type: 'number', description: 'Messages this person sent Ethan' },
+              sent: { type: 'number', description: 'Texts or email: messages Ethan sent this person in the scanned window' },
+              received: { type: 'number', description: 'Texts or email: messages this person sent Ethan' },
+              meetings: {
+                type: 'object',
+                description: 'Meetings: how often this person met Ethan in the scanned window',
+                properties: {
+                  one_on_one: { type: 'number', description: 'Meetings with only Ethan and this person' },
+                  group: { type: 'number', description: 'Other meetings they attended, up to meeting_max_attendees' },
+                },
+                required: ['one_on_one', 'group'],
+              },
               automated: { type: 'boolean', description: 'true if the sender looks like bulk, marketing or system mail (list headers, Promotions/Updates category)' },
             },
-            required: ['name', 'identifiers', 'sent', 'received'],
+            required: ['name', 'identifiers'],
           },
         },
-        min_messages: { type: 'number', description: 'suggest_min_messages from parameters.md' },
-        min_each_way: { type: 'number', description: 'suggest_min_each_way from parameters.md' },
+        min_messages: { type: 'number', description: 'suggest_min_messages from parameters.md (texts and email)' },
+        min_each_way: { type: 'number', description: 'suggest_min_each_way from parameters.md (texts and email)' },
+        min_one_on_one_meetings: { type: 'number', description: 'suggest_min_one_on_one_meetings from parameters.md (meetings)' },
         ignore_no_reply: { type: 'boolean', description: 'ignore_no_reply_senders from parameters.md' },
-        queue_source: { type: 'string', enum: ['email', 'imessage'], description: 'Set this during an unattended sweep: everything that needs Ethan\'s decision (suggestions, possible duplicates, conflicts) is also left in the review queue, tagged with this source. Leave it out when Ethan is in the conversation.' },
+        queue_source: { type: 'string', enum: ['email', 'imessage', 'meeting'], description: 'Set this during an unattended sweep: everything that needs Ethan\'s decision (suggestions, possible duplicates, conflicts) is also left in the review queue, tagged with this source. Leave it out when Ethan is in the conversation.' },
       },
-      required: ['candidates', 'min_messages', 'min_each_way', 'ignore_no_reply'],
+      required: ['candidates', 'ignore_no_reply'],
     },
   },
   {
@@ -461,6 +471,7 @@ async function callTool(name: string, args: Record<string, unknown>) {
         criteria: {
           min_messages: Number(args.min_messages),
           min_each_way: Number(args.min_each_way),
+          min_one_on_one_meetings: Number(args.min_one_on_one_meetings),
           ignore_no_reply: args.ignore_no_reply !== false,
         },
         queue: optionalString(args.queue_source) ? { source: String(args.queue_source) } : undefined,
@@ -530,7 +541,7 @@ Deno.serve(async (req) => {
       return json(rpcResult(id, {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'open-brain-mcp', version: '1.3.0' },
+        serverInfo: { name: 'open-brain-mcp', version: '1.4.0' },
       }))
     }
 

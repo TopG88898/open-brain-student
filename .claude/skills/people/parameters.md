@@ -15,6 +15,8 @@ This file is committed to a public repo. It never holds names, phone numbers, em
 | `ignore_no_reply_senders` | true | Never suggest no-reply, marketing or automated senders. |
 | `sync_lookback_days` | 30 | How far back the first Sync reads. |
 | `gmail_query` | `(in:inbox OR in:sent) -category:promotions -category:updates -category:social -category:forums` | Which Gmail a Sync reads: Inbox and Sent, without bulk categories. `after:` is added from the last Sync. |
+| `suggest_min_one_on_one_meetings` | 1 | Fewest meetings with only Ethan and them before someone is suggested from meetings. |
+| `meeting_max_attendees` | 8 | Meetings with more attendees (counting Ethan) are ignored: no Interactions, no Suggestions. |
 | `sweep_schedule` | daily, 07:00 | When the scheduled Sweep runs. Off until manual runs look right. |
 
 ## Sources
@@ -24,5 +26,5 @@ This file is committed to a public repo. It never holds names, phone numbers, em
 | `note` | Active |
 | `imessage` | Active (manual Sync) |
 | `email` | Active (manual Sync) |
-| `meeting` | Milestone 3 |
+| `meeting` | Active (Granola and Calendar) |
 | `telegram` | Milestone 3 |

@@ -1,11 +1,11 @@
 ---
 name: people
-description: Keep a private file on the people Ethan deals with. Use when he asks to add a note about a person, correct something about them, look someone up ("what do I know about Sarah?"), set a follow-up, forget someone, sync his texts or email into their files, review the people queue, or run a sweep.
+description: Keep a private file on the people Ethan deals with. Use when he asks to add a note about a person, correct something about them, look someone up ("what do I know about Sarah?"), set a follow-up, forget someone, sync his texts, email or meetings into their files, review the people queue, or run a sweep.
 ---
 
 Files live in Supabase and are reached through the `open-brain` MCP tools: `upsert_person`, `add_interaction`, `set_fact`, `get_person`, `search_people`, `forget_person`, `start_sync`, `finish_sync`, `suggest_people`, `resolve_suggestion`, `list_review_queue`, `close_review_item`. Terms are defined in [CONTEXT.md](CONTEXT.md). Settings are in [parameters.md](parameters.md): read it first every run.
 
-Notes, lookups, manual syncs of texts and email, the review queue and sweeps of texts and email work today. If asked to sync meetings or Telegram, say those are not built yet (Milestone 3).
+Notes, lookups, manual syncs of texts, email and meetings, the review queue and sweeps work today. If asked to read Telegram, say it is not built yet (Milestone 3c).
 
 ## Adding a note
 
@@ -46,9 +46,25 @@ One source per run: `email` (Gmail connector) or `imessage` (iMessage connector)
 2. Scan from senders and recipients alone. For email, search Gmail with `gmail_query` from parameters.md plus `after:` `since`. For iMessage, list conversations since `since`. Group by identifier and count messages Ethan sent (`sent`) and received (`received`). Set `automated` for list, bulk or system senders. Message text stays unread at this stage.
 3. Call `suggest_people` with every candidate and the three `suggest_*` and `ignore_*` values from parameters.md. Results come back in candidate order.
 4. Read message text only for `has_file` people; skipped people are never opened. For each has_file person, write one Interaction per email thread or per day of texts with `add_interaction`: source `email` or `imessage`, `direction` `in` when they wrote last, `source_ref` the id of the newest message the summary covers (Gmail message id, iMessage message GUID), and `refresh_profile` false on every entry except that person's last. Follow the summary rules under Adding a note.
-5. Show one numbered batch: each `suggested` and `already_suggested` person with name, identifier, `sent` and `received`, and a one-line reason they cleared the threshold. List each `possible_duplicate` (ask whether it is the same person) and each `conflict` (report, never merge). Give skipped people as counts by reason, without names. Say nothing at all about `excluded`.
+5. Show one numbered batch: each `suggested` and `already_suggested` person with name, identifier, `sent` and `received` (or, for meetings, how many one-on-one and group meetings), and a one-line reason they cleared the threshold. List each `possible_duplicate` (ask whether it is the same person) and each `conflict` (report, never merge). Give skipped people as counts by reason, without names. Say nothing at all about `excluded`.
 6. Apply his answer with `resolve_suggestion`, one call per person. For each approved person, read their messages from this scan and add Interactions as in step 4. A person approved in a later session has no Interactions yet: read their messages back `sync_lookback_days` and add them the same way.
 7. Call `finish_sync` with `T`, once steps 4 to 6 succeeded. A sync that failed midway is retried from the same `since`: `source_ref` makes the repeat safe.
+
+## Syncing meetings
+
+Source `meeting` reads Granola and Calendar together. The sync is done when the batch has been shown and `finish_sync` has been called.
+
+1. Note the current time as `T`. Call `start_sync` with source `meeting` and `sync_lookback_days`; it returns `since`.
+2. Collect meetings since `since` that have ended.
+   - Granola: `list_meetings` offers only `this_week`, `last_week` and `last_30_days`. Take the smallest that covers `since` and drop meetings before it.
+   - Calendar: `list_events` from `since` to now. Keep timed events of type `DEFAULT` that Ethan has not declined and that have at least one other attendee.
+   - A Granola meeting and a Calendar event with overlapping start times and shared attendees or title are one meeting.
+3. Drop every meeting with more than `meeting_max_attendees` attendees (counting Ethan), and every meeting whose title is about an `avoid_topics` subject.
+4. Identify attendees by email address, taken from list metadata and Calendar events. Open a Granola meeting for its attendee list only when nothing else shows it, and use nothing else from its notes until `suggest_people` has returned. An attendee with no email address is skipped, never guessed.
+5. Build one candidate per person: `meetings.one_on_one` counts meetings where they were the only other attendee, `meetings.group` the rest. Set `automated` for room and resource calendars and note-taker bots. Call `suggest_people` with `min_one_on_one_meetings` and `ignore_no_reply` from parameters.md in place of the message thresholds.
+6. For each `has_file` person, add one Interaction per meeting with `add_interaction`: source `meeting`, `occurred_at` the start time, no `direction`, and `refresh_profile` false except on that person's last entry. `source_ref` is `cal:` plus the Calendar event id when the meeting has one, else `granola:` plus the Granola id. Write the summary yourself in one or two factual sentences of what was discussed, from Granola's notes when there are any; with only a Calendar event, use the title and time.
+7. Show the batch and apply his answers as in Syncing steps 5 and 6 (meeting counts in place of message counts).
+8. Call `finish_sync` with `T`, once steps 6 and 7 succeeded.
 
 ## Reviewing the queue
 
@@ -56,21 +72,21 @@ Start every run by calling `list_review_queue`. When something is waiting, say h
 
 1. Show one numbered batch as in Syncing step 5: each `suggestion` with source, `sent` and `received`; each `possible_duplicate` with the candidates from `candidate_ids` (`get_person` each); each `conflict` with the people in `person_ids`.
 2. Apply his answers:
-   - `suggestion`: `resolve_suggestion`, which also clears the item. For each approved person, read their messages back `sync_lookback_days` and add Interactions as in Syncing step 4.
+   - `suggestion`: `resolve_suggestion`, which also clears the item. For each approved person, read their messages or meetings back `sync_lookback_days` and add Interactions as in Syncing step 4 or Syncing meetings step 5.
    - `possible_duplicate`: same person, then `upsert_person` with that candidate's `id` and the identifiers from `detail`; different person, then `upsert_person` with `confirm_new`. Then `close_review_item`.
    - `conflict`: report it and never merge. `close_review_item` once he has seen it.
 
 ## Running a Sweep
 
-A Sweep is a Sync that runs while Ethan is away, so nobody can answer a question. Decide everything the rules decide and leave the rest in the review queue. The sweep is done when both sources have been tried and the summary is written.
+A Sweep is a Sync that runs while Ethan is away, so nobody can answer a question. Decide everything the rules decide and leave the rest in the review queue. The sweep is done when all three sources have been tried and the summary is written.
 
-For `email`, then `imessage`, follow Syncing steps 1 to 4 and 7, with these changes:
+Run `email`, then `imessage` (Syncing), then `meeting` (Syncing meetings), each in full except for these changes:
 
-- Step 3: pass `queue_source` (the source name) to `suggest_people`. That is what puts suggestions, possible duplicates and conflicts in the queue.
-- Steps 5 and 6 do not run. Nothing is shown to anyone, and no call to `resolve_suggestion`, `close_review_item` or `upsert_person` with `confirm_new` is made.
-- A source that fails midway is left without `finish_sync`, so the next sweep retries from the same `since`. Carry on with the other source.
+- Pass `queue_source` (the source name) to `suggest_people`. That is what puts suggestions, possible duplicates and conflicts in the queue.
+- The step that shows a batch and applies answers does not run. Nothing is shown to anyone, and no call to `resolve_suggestion`, `close_review_item` or `upsert_person` with `confirm_new` is made.
+- A source that fails midway is left without `finish_sync`, so the next sweep retries from the same `since`. Carry on with the next source.
 
-Finish with a summary of counts only: per source, Interactions added, items now in the queue, people skipped by reason, and errors. Names and message text stay out of it.
+Finish with a summary of counts only: per source, Interactions added, items now in the queue, people skipped by reason, and errors. Names, titles and message text stay out of it.
 
 ## Boundaries
 

@@ -22,8 +22,8 @@ export interface ExclusionEntry {
 export const INTERACTION_SOURCES = ['imessage', 'email', 'note', 'meeting', 'telegram'] as const
 export type InteractionSource = (typeof INTERACTION_SOURCES)[number]
 
-/** Sources a Sync can read today. Meetings and Telegram arrive with the scheduled Sweep. */
-export const SYNC_SOURCES = ['email', 'imessage'] as const
+/** Sources a Sync can read. Telegram notes arrive through the bot, not a Sync. */
+export const SYNC_SOURCES = ['email', 'imessage', 'meeting'] as const
 
 export type PersonStatus = 'suggested' | 'active' | 'dismissed'
 
@@ -80,6 +80,7 @@ export interface ReviewDetail {
   identifiers: Identifier[]
   sent?: number
   received?: number
+  meetings?: { one_on_one: number; group: number }
   /** possible_duplicate: the existing people who share the name. */
   candidate_ids?: string[]
   /** conflict: the existing people who each own one of the identifiers. */
@@ -208,21 +209,28 @@ export type RefreshProfileResult =
   | { status: 'refreshed'; summary: string }
   | { status: 'failed'; reason: string }
 
-/** One person seen in a scan of texts or email, with how much they and Ethan wrote to each other. */
+/**
+ * One person seen in a scan. From texts or email, `sent` and `received` say how much they and
+ * Ethan wrote to each other; from meetings, `meetings` says how often they met.
+ */
 export interface Candidate {
   name: string
   identifiers: Identifier[]
   /** Messages Ethan sent them. */
-  sent: number
+  sent?: number
   /** Messages they sent Ethan. */
-  received: number
+  received?: number
+  /** Meetings they attended: those with only Ethan and them, and the rest of the small ones. */
+  meetings?: { one_on_one: number; group: number }
   /** The caller's own judgement that this is a bulk, marketing or system sender. */
   automated?: boolean
 }
 
+/** Each threshold is needed only when the scan has candidates of that kind. */
 export interface SuggestCriteria {
-  min_messages: number
-  min_each_way: number
+  min_messages?: number
+  min_each_way?: number
+  min_one_on_one_meetings?: number
   ignore_no_reply: boolean
 }
 
@@ -386,11 +394,17 @@ export function createPeople(deps: PeopleDeps): People {
     if (criteria.ignore_no_reply && (candidate.automated || looksAutomated(identifiers))) {
       return done({ status: 'skipped', reason: 'automated' })
     }
-    if (candidate.sent + candidate.received < criteria.min_messages) {
-      return done({ status: 'skipped', reason: 'below_threshold' })
-    }
-    if (candidate.sent < criteria.min_each_way || candidate.received < criteria.min_each_way) {
-      return done({ status: 'skipped', reason: 'one_way' })
+    if (candidate.meetings) {
+      if (candidate.meetings.one_on_one < criteria.min_one_on_one_meetings!) {
+        return done({ status: 'skipped', reason: 'below_threshold' })
+      }
+    } else {
+      const sent = candidate.sent!
+      const received = candidate.received!
+      if (sent + received < criteria.min_messages!) return done({ status: 'skipped', reason: 'below_threshold' })
+      if (sent < criteria.min_each_way! || received < criteria.min_each_way!) {
+        return done({ status: 'skipped', reason: 'one_way' })
+      }
     }
     // A shared name is a hint, never proof: Ethan decides whether this is someone new.
     const sameName = await store.peopleByName(candidate.name)
@@ -407,7 +421,13 @@ export function createPeople(deps: PeopleDeps): People {
     identifiers: Identifier[],
     source: string,
   ) {
-    const seen = { source, identifiers, sent: candidate.sent, received: candidate.received }
+    const seen: ReviewDetail = {
+      source,
+      identifiers,
+      ...(candidate.meetings
+        ? { meetings: candidate.meetings }
+        : { sent: candidate.sent, received: candidate.received }),
+    }
     const identifierKey = identifiers.map((i) => `${i.type}:${i.value}`).sort().join('|')
     switch (result.status) {
       case 'suggested':
@@ -483,12 +503,23 @@ export function createPeople(deps: PeopleDeps): People {
 
     async suggestPeople({ candidates, criteria, queue }) {
       // A missing threshold compares as false against everything, which would suggest every sender.
-      for (const key of ['min_messages', 'min_each_way'] as const) {
+      const needs = (key: 'min_messages' | 'min_each_way' | 'min_one_on_one_meetings') => {
         if (!Number.isFinite(criteria[key])) throw new Error(`${key} must be a number`)
       }
       for (const candidate of candidates) {
-        for (const key of ['sent', 'received'] as const) {
-          if (!Number.isFinite(candidate[key])) throw new Error(`${key} must be a number for "${candidate.name}"`)
+        if (candidate.meetings) {
+          needs('min_one_on_one_meetings')
+          for (const key of ['one_on_one', 'group'] as const) {
+            if (!Number.isFinite(candidate.meetings[key])) {
+              throw new Error(`${key} must be a number for "${candidate.name}"`)
+            }
+          }
+        } else {
+          needs('min_messages')
+          needs('min_each_way')
+          for (const key of ['sent', 'received'] as const) {
+            if (!Number.isFinite(candidate[key])) throw new Error(`${key} must be a number for "${candidate.name}"`)
+          }
         }
       }
       const results: SuggestionResult[] = []

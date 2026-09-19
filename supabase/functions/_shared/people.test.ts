@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { beforeEach, describe, it } from 'node:test'
 
-import { createPeople, type Candidate, type People } from './people.ts'
+import { createPeople, type Candidate, type People, type SuggestCriteria } from './people.ts'
 import { createMemoryStore } from './people.test-store.ts'
 
 let people: People
@@ -693,7 +693,14 @@ describe('sync window', () => {
     assert.deepEqual(await people.startSync('email', { lookback_days: 30 }), { since: '2026-09-17T08:00:00.000Z' })
   })
 
-  it('only email and imessage can be synced for now', async () => {
+  it('meetings have their own marker', async () => {
+    await people.finishSync('meeting', '2026-09-17T08:00:00Z')
+
+    assert.deepEqual(await people.startSync('meeting', { lookback_days: 30 }), { since: '2026-09-17T08:00:00.000Z' })
+    assert.deepEqual(await people.startSync('email', { lookback_days: 30 }), { since: '2026-08-19T12:00:00.000Z' })
+  })
+
+  it('only email, imessage and meeting can be synced', async () => {
     await assert.rejects(people.startSync('note', { lookback_days: 30 }), /cannot be synced/)
   })
 })
@@ -819,5 +826,69 @@ describe('review queue', () => {
 
     const left = await people.listReviewQueue()
     assert.deepEqual(left.items.map((i) => i.id), [pending.id])
+  })
+})
+
+describe('suggestPeople from meetings', () => {
+  const MEETING_CRITERIA = { ...CRITERIA, min_one_on_one_meetings: 1 }
+  const meeting = (over: Partial<Candidate> = {}): Candidate => ({
+    name: 'Test Person',
+    identifiers: [{ type: 'email', value: 'test.person@example.com' }],
+    meetings: { one_on_one: 1, group: 0 },
+    ...over,
+  })
+  const scan = (candidates: Candidate[], criteria: SuggestCriteria = MEETING_CRITERIA, queue?: { source: string }) =>
+    people.suggestPeople({ candidates, criteria, queue })
+
+  it('suggests someone Ethan met one-on-one, with no message counts needed', async () => {
+    const [result] = await scan([meeting()])
+
+    assert.equal(result.status, 'suggested')
+  })
+
+  it('skips someone who only ever appeared in group meetings', async () => {
+    const [result] = await scan([meeting({ meetings: { one_on_one: 0, group: 5 } })])
+
+    assert.deepEqual(result, { status: 'skipped', reason: 'below_threshold' })
+  })
+
+  it('follows the configured number of one-on-ones', async () => {
+    const criteria = { ...MEETING_CRITERIA, min_one_on_one_meetings: 2 }
+    const [once] = await scan([meeting({ meetings: { one_on_one: 1, group: 3 } })], criteria)
+    const [twice] = await scan([meeting({ meetings: { one_on_one: 2, group: 0 } })], criteria)
+
+    assert.deepEqual(once, { status: 'skipped', reason: 'below_threshold' })
+    assert.equal(twice.status, 'suggested')
+  })
+
+  it('skips a room or note-taker bot the caller flagged as automated', async () => {
+    const [result] = await scan([meeting({ automated: true })])
+
+    assert.deepEqual(result, { status: 'skipped', reason: 'automated' })
+  })
+
+  it('still reports someone who already has a file, even from a single group meeting', async () => {
+    const existing = await people.upsertPerson({ name: 'Test Person', identifiers: [{ type: 'email', value: 'test.person@example.com' }] })
+    if (existing.status !== 'created') throw new Error('setup failed')
+
+    const [result] = await scan([meeting({ meetings: { one_on_one: 0, group: 1 } })])
+
+    assert.equal(result.status === 'has_file' && result.person.id, existing.person.id)
+  })
+
+  it('leaves a meeting suggestion in the review queue with how often they met', async () => {
+    await scan([meeting({ meetings: { one_on_one: 2, group: 3 } })], MEETING_CRITERIA, { source: 'meeting' })
+
+    const [item] = (await people.listReviewQueue()).items
+    assert.equal(item.detail.source, 'meeting')
+    assert.deepEqual(item.detail.meetings, { one_on_one: 2, group: 3 })
+  })
+
+  it('refuses to run without a usable meeting threshold or counts, rather than suggesting everyone', async () => {
+    await assert.rejects(scan([meeting()], CRITERIA), /min_one_on_one_meetings/)
+    await assert.rejects(
+      scan([meeting({ meetings: { one_on_one: undefined as unknown as number, group: 0 } })]),
+      /one_on_one/,
+    )
   })
 })
