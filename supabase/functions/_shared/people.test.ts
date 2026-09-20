@@ -706,7 +706,7 @@ describe('refreshProfile', () => {
     assert.equal(file.person.profile_updated_at, '2026-09-18T12:00:00.000Z')
   })
 
-  it('asks for a profile of the person, not of Ethan, saying who they are to him', async () => {
+  it('asks for who the person is to Ethan and what passed between them, not a profile of the person alone', async () => {
     const person = await someone('Test Person')
     await people.addInteraction({ person_id: person.id, source: 'imessage', summary: 'Ethan and Test Person planned lunch.' })
     let prompt = ''
@@ -719,8 +719,9 @@ describe('refreshProfile', () => {
     })
 
     assert.match(prompt, /Ethan's private file on Test Person/)
-    assert.match(prompt, /about Test Person, not about Ethan/)
+    assert.doesNotMatch(prompt, /not about Ethan/)
     assert.match(prompt, /who Test Person is and how Ethan knows them/)
+    assert.match(prompt, /what Ethan asked, offered or did, and what Test Person asked, offered, said or did/)
   })
 
   it('keeps each action with whoever did it, and leaves out entries that touch an avoided topic', async () => {
