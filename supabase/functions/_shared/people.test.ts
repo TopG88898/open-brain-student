@@ -762,6 +762,26 @@ describe('refreshProfile', () => {
     assert.doesNotMatch(prompt, /Mention Ethan only where needed/)
   })
 
+  it('treats the word limit as a hard cap, aims below it, and forbids hedging and inferred plans', async () => {
+    const person = await someone('Test Person')
+    await people.addInteraction({ person_id: person.id, source: 'imessage', summary: 'Test Person sent a map pin.' })
+    let prompt = ''
+
+    await people.refreshProfile(person.id, {
+      summarize: async (p) => {
+        prompt = p
+        return 'Test Person is a friend.'
+      },
+      maxWords: 100,
+    })
+
+    assert.match(prompt, /at most 100 words/)
+    assert.match(prompt, /Aim for about 75 words/)
+    assert.match(prompt, /never go over 100/i)
+    assert.match(prompt, /do not hedge.*"appears", "apparently" or "seemingly"/i)
+    assert.match(prompt, /do not infer a plan, intention or offer/i)
+  })
+
   it('leaves out a fact that touches an avoided topic', async () => {
     const person = await someone('Test Person')
     await people.setFact(person.id, 'employer', 'Acme')
