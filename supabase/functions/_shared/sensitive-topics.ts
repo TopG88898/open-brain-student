@@ -14,7 +14,10 @@ const TOPIC_STEMS: Record<string, string[]> = {
   health: ['health', ...MEDICAL],
   medical: MEDICAL,
   legal: ['legal', 'lawyer', 'attorney', 'lawsuit', 'sue[sd]?\\b'],
-  financial: ['financ', 'debt', 'bankrupt'],
+  financial: [
+    'financ', 'debt', 'bankrupt', 'invoice', 'paid\\b', 'pric(?:e|ing)', 'salary', 'loan', 'bank',
+    'tax(?:es)?\\b',
+  ],
   religion: [
     'religio', 'church', 'worship', 'pray', 'bible', 'faith', 'sermon', 'baptis',
     'islam', 'muslim', 'christian', 'jewish', 'mosque', 'synagogue', 'god\\b',
