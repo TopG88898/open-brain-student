@@ -194,6 +194,18 @@ export function createRestPeopleStore(config: RestStoreConfig): PeopleStore {
       await rest(`people?id=eq.${id}`, { method: 'DELETE', prefer: 'return=minimal' })
     },
 
+    async moveFile(fromId, toId) {
+      // One PATCH per table, each safe to repeat. Ownership changes and the values stay the same,
+      // so the (type, value) and (source, source_ref) keys cannot clash.
+      for (const table of ['interactions', 'person_facts', 'thoughts', 'person_identifiers']) {
+        await rest(`${table}?person_id=eq.${fromId}`, {
+          method: 'PATCH',
+          prefer: 'return=minimal',
+          body: JSON.stringify({ person_id: toId }),
+        })
+      }
+    },
+
     async addExclusions(entries: ExclusionEntry[]) {
       if (!entries.length) return
       await rest('person_exclusions?on_conflict=type,value', {

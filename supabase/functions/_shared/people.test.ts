@@ -526,6 +526,148 @@ describe('forgetPerson', () => {
   })
 })
 
+describe('mergePeople', () => {
+  /** The real file and a duplicate that some sync created from an email address. */
+  async function pair() {
+    const real = await people.upsertPerson({
+      name: 'Dominic Bejar',
+      identifiers: [{ type: 'phone', value: '303-555-0142' }, { type: 'alias', value: 'Dom' }],
+    })
+    const dup = await people.upsertPerson({
+      name: 'dominic',
+      identifiers: [{ type: 'email', value: 'dom@example.com' }],
+    })
+    if (real.status !== 'created' || dup.status !== 'created') throw new Error('setup failed')
+    return { real: real.person, dup: dup.person }
+  }
+
+  it('asks for confirmation first and leaves both files untouched until it gets it', async () => {
+    const { real, dup } = await pair()
+
+    const asked = await people.mergePeople(dup.id, real.id, { confirm: false })
+
+    assert.equal(asked.status, 'confirmation_required')
+    if (asked.status !== 'confirmation_required') return
+    assert.equal(asked.from.name, 'dominic')
+    assert.equal(asked.into.name, 'Dominic Bejar')
+    assert.deepEqual(asked.identifiers, [{ type: 'email', value: 'dom@example.com' }])
+    assert.equal((await people.getPerson({ id: dup.id })).status, 'found')
+  })
+
+  it('moves identifiers so later syncs file on the real name, and removes the duplicate', async () => {
+    const { real, dup } = await pair()
+
+    const merged = await people.mergePeople(dup.id, real.id, { confirm: true })
+
+    assert.equal(merged.status, 'merged')
+    assert.equal((await people.getPerson({ id: dup.id })).status, 'not_found')
+    const viaEmail = await people.getPerson({ identifier: { type: 'email', value: 'dom@example.com' } })
+    assert.equal(viaEmail.status === 'found' && viaEmail.person.id, real.id)
+    const file = await people.getPerson({ id: real.id })
+    assert.equal(file.status === 'found' && file.identifiers.length, 4) // phone, email, "dom", "dominic"
+  })
+
+  it('keeps the duplicate\'s name as an alias, so a note written to it still finds the person', async () => {
+    const { real, dup } = await pair()
+    await people.mergePeople(dup.id, real.id, { confirm: true })
+
+    const noted = await people.recordNote({ name: 'dominic', note: 'Wants coffee.', source_ref: 'tg-1' })
+
+    assert.equal(noted.status, 'added')
+    assert.equal(noted.status === 'added' && noted.person.id, real.id)
+  })
+
+  it('does not exclude the merged identifiers the way forgetting would', async () => {
+    const { real, dup } = await pair()
+    await people.mergePeople(dup.id, real.id, { confirm: true })
+
+    const again = await people.upsertPerson({ identifiers: [{ type: 'email', value: 'dom@example.com' }] })
+
+    assert.equal(again.status, 'matched')
+  })
+
+  it('moves the timeline and takes the newest last contact', async () => {
+    const { real, dup } = await pair()
+    await people.addInteraction({
+      person_id: real.id, source: 'imessage', summary: 'Older text.', occurred_at: '2026-09-01T10:00:00Z', source_ref: 'a',
+    })
+    await people.addInteraction({
+      person_id: dup.id, source: 'meeting', summary: 'Newer meeting.', occurred_at: '2026-09-10T10:00:00Z', source_ref: 'b',
+    })
+
+    await people.mergePeople(dup.id, real.id, { confirm: true })
+
+    const file = await people.getPerson({ id: real.id })
+    if (file.status !== 'found') throw new Error('missing')
+    assert.deepEqual(file.interactions.map((i) => i.summary), ['Newer meeting.', 'Older text.'])
+    assert.equal(file.person.last_contact_at, '2026-09-10T10:00:00.000Z')
+  })
+
+  it('keeps the real file\'s current fact when both have one, and keeps the other as history', async () => {
+    const { real, dup } = await pair()
+    await people.setFact(real.id, 'employer', 'Acme')
+    await people.setFact(dup.id, 'employer', 'Other Co')
+    await people.setFact(dup.id, 'city', 'Phoenix')
+
+    await people.mergePeople(dup.id, real.id, { confirm: true })
+
+    const file = await people.getPerson({ id: real.id })
+    if (file.status !== 'found') throw new Error('missing')
+    const active = Object.fromEntries(file.facts.active.map((f) => [f.key, f.value]))
+    assert.deepEqual(active, { employer: 'Acme', city: 'Phoenix' })
+    assert.deepEqual(file.facts.superseded.map((f) => f.value), ['Other Co'])
+  })
+
+  it('fills in what the real file lacks: relationship and follow-up, but never overwrites them', async () => {
+    const { real, dup } = await pair()
+    await people.upsertPerson({ id: real.id, relationship: 'friend' })
+    await people.upsertPerson({
+      id: dup.id, relationship: 'colleague', follow_up_at: '2026-10-01T00:00:00Z', follow_up_note: 'Ask about AI',
+    })
+
+    await people.mergePeople(dup.id, real.id, { confirm: true })
+
+    const file = await people.getPerson({ id: real.id })
+    if (file.status !== 'found') throw new Error('missing')
+    assert.equal(file.person.relationship, 'friend')
+    assert.equal(file.person.follow_up_note, 'Ask about AI')
+  })
+
+  it('closes the duplicate\'s suggestion and any conflict between the two', async () => {
+    const { real, dup } = await pair()
+    await people.suggestPeople({
+      candidates: [{ name: 'X', identifiers: [{ type: 'phone', value: '303-555-0142' }, { type: 'email', value: 'dom@example.com' }], sent: 5, received: 5 }],
+      criteria: { min_messages: 6, min_each_way: 2, ignore_no_reply: true },
+      queue: { source: 'imessage' },
+    })
+    assert.equal((await people.listReviewQueue()).items.filter((i) => i.kind === 'conflict').length, 1)
+
+    await people.mergePeople(dup.id, real.id, { confirm: true })
+
+    assert.equal((await people.listReviewQueue()).count, 0)
+  })
+
+  it('refuses to merge a file into itself, or into someone without an approved file', async () => {
+    const { real, dup } = await pair()
+    const pending = await people.suggestPeople({
+      candidates: [{ name: 'Pat', identifiers: [{ type: 'phone', value: '602-555-0100' }], sent: 5, received: 5 }],
+      criteria: { min_messages: 6, min_each_way: 2, ignore_no_reply: true },
+    })
+    const suggested = pending[0].status === 'suggested' ? pending[0].person : null
+    if (!suggested) throw new Error('setup failed')
+
+    await assert.rejects(people.mergePeople(real.id, real.id, { confirm: true }), /itself/i)
+    await assert.rejects(people.mergePeople(dup.id, suggested.id, { confirm: true }), /not approved/i)
+  })
+
+  it('says not_found when either file is missing', async () => {
+    const { real } = await pair()
+
+    assert.equal((await people.mergePeople('nobody', real.id, { confirm: true })).status, 'not_found')
+    assert.equal((await people.mergePeople(real.id, 'nobody', { confirm: true })).status, 'not_found')
+  })
+})
+
 describe('refreshProfile', () => {
   it('writes a profile from current facts and recent interactions, leaving out corrected claims', async () => {
     const person = await someone('Test Person')

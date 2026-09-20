@@ -159,6 +159,12 @@ export function createMemoryStore(): PeopleStore {
       for (let n = reviewItems.length - 1; n >= 0; n--) if (reviewItems[n].person_id === id) reviewItems.splice(n, 1)
     },
 
+    async moveFile(fromId, toId) {
+      for (const [key, owner] of [...identifiers]) if (owner === fromId) identifiers.set(key, toId)
+      for (const i of interactions) if (i.person_id === fromId) i.person_id = toId
+      for (const f of facts) if (f.person_id === fromId) f.person_id = toId
+    },
+
     async addExclusions(entries: ExclusionEntry[]) {
       for (const e of entries) exclusions.add(idKey(e))
     },

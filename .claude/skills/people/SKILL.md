@@ -3,7 +3,7 @@ name: people
 description: Keep a private file on the people Ethan deals with. Use when he asks to add a note about a person, correct something about them, look someone up ("what do I know about Sarah?"), set a follow-up, forget someone, sync his texts, email or meetings into their files, review the people queue, or run a sweep.
 ---
 
-Files live in Supabase and are reached through the `open-brain` MCP tools: `upsert_person`, `add_interaction`, `set_fact`, `get_person`, `search_people`, `forget_person`, `start_sync`, `finish_sync`, `suggest_people`, `resolve_suggestion`, `list_review_queue`, `close_review_item`. Terms are defined in [CONTEXT.md](CONTEXT.md). Settings are in [parameters.md](parameters.md): read it first every run.
+Files live in Supabase and are reached through the `open-brain` MCP tools: `upsert_person`, `add_interaction`, `set_fact`, `get_person`, `search_people`, `forget_person`, `merge_people`, `start_sync`, `finish_sync`, `suggest_people`, `resolve_suggestion`, `list_review_queue`, `close_review_item`. Terms are defined in [CONTEXT.md](CONTEXT.md). Settings are in [parameters.md](parameters.md): read it first every run.
 
 Notes, lookups, manual syncs of texts, email and meetings, the review queue, sweeps and notes dictated in Telegram all work today. Telegram is a way for Ethan to dictate notes to the bot, not a source to read: there is no connector for other people's chats, so if asked to read them, say so.
 
@@ -34,13 +34,21 @@ Call `set_fact` with the same key and the new value. The old value is kept as Su
 ## Creating or merging
 
 - `possible_duplicate`: show Ethan the candidate and ask whether it is the same person. Same person: call `upsert_person` with the candidate's `id` and the new identifiers. Different person: call again with `confirm_new`.
-- `conflict`: tell him the identifiers belong to two Files. Never merge them.
+- `conflict`: tell him the identifiers belong to two Files. Never merge them on your own; if he says they are the same person, see Merging two Files.
 - `excluded`: he asked never to track this person. Do not create a File and do not repeat their details.
 
 ## Forgetting someone
 
 1. Call `forget_person` with `confirm` false. Tell him whose File will be permanently deleted.
 2. Only after he says yes, call it again with `confirm` true.
+
+## Merging two Files
+
+For a duplicate: two Files that are the same person, such as a nickname or a second number filed apart. Only when Ethan says they are the same. Nicknames and short names need no question; see the memory notes.
+
+1. Work out which File is the real one (the fuller name, the one with the Timeline). The other is the duplicate. If it is not clear, ask.
+2. Call `merge_people` with `from_person_id` the duplicate, `into_person_id` the real File, and `confirm` false. Tell him which File folds into which, and what moves.
+3. Only after he says yes, call it again with `confirm` true. Do not use `forget_person` for a duplicate: it excludes the identifiers.
 
 ## Syncing texts or email
 
@@ -78,7 +86,7 @@ Start every run by calling `list_review_queue`. When something is waiting, say h
 2. Apply his answers:
    - `suggestion`: `resolve_suggestion`, which also clears the item. For each approved person, read their messages or meetings back `sync_lookback_days` and add Interactions as in Syncing step 4 or Syncing meetings step 5.
    - `possible_duplicate`: same person, then `upsert_person` with that candidate's `id` and the identifiers from `detail`; different person, then `upsert_person` with `confirm_new`. Then `close_review_item`.
-   - `conflict`: report it and never merge. `close_review_item` once he has seen it.
+   - `conflict`: report it and never merge on your own. If he says they are the same person, Merging two Files (that also clears the item); otherwise `close_review_item` once he has seen it.
    - `unmatched_note`: ask whose File it belongs on, or whether to drop it. `no_match`: he may mean an existing Person under another name (then `upsert_person` with that `id` and the name as an `alias` Identifier, so it matches next time) or someone new (then `upsert_person` with the name). `ambiguous`: ask which of `candidate_ids`. `not_approved`: `resolve_suggestion` approve first, if he agrees. Then `add_interaction` with source `note`, `summary` his note in the same words unless it touches an `avoid_topics` subject, `occurred_at` from `detail`, and `source_ref` the item's `key`. `close_review_item` after that, or straight away if he drops it.
 
 ## Running a Sweep

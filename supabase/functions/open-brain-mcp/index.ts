@@ -174,6 +174,21 @@ const TOOLS = [
     },
   },
   {
+    name: 'merge_people',
+    description: 'Fold a duplicate file into the real one, when two files are the same person (a nickname or a second phone number or email that a sync filed separately). Moves the duplicate\'s identifiers, timeline, facts and tied thoughts to "into_person_id", keeps its name as an alias, and deletes the duplicate. Unlike forget_person it excludes nobody, so the moved identifiers keep matching the real person. The real file keeps its own name, profile, relationship and follow-up; where both have a current fact for the same key, the real file\'s wins and the other stays as history. The real person must be approved. Always call it first with confirm=false, tell the user which file is folded into which, and call again with confirm=true only after they say yes. Regenerates the real person\'s profile afterwards.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from_person_id: { type: 'string', description: 'The duplicate: this file is deleted' },
+        into_person_id: { type: 'string', description: 'The real file: it keeps everything' },
+        confirm: { type: 'boolean', description: 'true only after the user has explicitly confirmed' },
+        profile_max_words: { type: 'number' },
+        avoid_topics: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['from_person_id', 'into_person_id', 'confirm'],
+    },
+  },
+  {
     name: 'start_sync',
     description: 'Begin a sync of one source ("email", "imessage" or "meeting"). Returns "since": read messages from that time forward. It is where the last finished sync stopped, or "lookback_days" ago on the first sync. Note the current time BEFORE reading and pass it to finish_sync afterwards, so messages that arrive while you read are not missed (duplicates are harmless: source_ref dedups them).',
     inputSchema: {
@@ -440,6 +455,14 @@ async function setFact(args: Record<string, unknown>) {
   return { ...result, profile }
 }
 
+async function mergePeople(args: Record<string, unknown>) {
+  const intoId = String(args.into_person_id ?? '')
+  const result = await people.mergePeople(String(args.from_person_id ?? ''), intoId, { confirm: args.confirm === true })
+  if (result.status !== 'merged') return result
+  const profile = await people.refreshProfile(intoId, profileOptions(args))
+  return { ...result, profile }
+}
+
 async function getPerson(args: Record<string, unknown>) {
   const identifier = optionalString(args.identifier_value)
     ? ({ type: String(args.identifier_type ?? ''), value: String(args.identifier_value) } as Identifier)
@@ -491,6 +514,8 @@ async function callTool(name: string, args: Record<string, unknown>) {
       return await searchPeople(String(args.query ?? ''))
     case 'forget_person':
       return await people.forgetPerson(String(args.person_id ?? ''), { confirm: args.confirm === true })
+    case 'merge_people':
+      return await mergePeople(args)
     case 'start_sync':
       return await people.startSync(String(args.source ?? ''), {
         lookback_days: typeof args.lookback_days === 'number' ? args.lookback_days : 30,

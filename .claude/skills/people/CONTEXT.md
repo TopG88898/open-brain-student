@@ -72,10 +72,14 @@ _Avoid_: 1:1 meeting, catch-up
 
 **Possible duplicate**:
 A new Person whose name matches an existing Person but who shares no Identifier with them. It is never merged automatically; Ethan decides.
+
+**Merge**:
+Folding a duplicate File into the real one Ethan names: its Identifiers, Timeline and Facts move over and its name becomes an alias. Unlike Forget it excludes nobody. Only Ethan can ask for it.
+_Avoid_: Combine, dedupe
 _Avoid_: Match, conflict
 
 **Conflict**:
-Identifiers that belong to two different existing Persons, which would require merging them. It is reported and never resolved automatically.
+Identifiers that belong to two different existing Persons, which would require a Merge. It is reported and never resolved automatically.
 _Avoid_: Duplicate
 
 **Unmatched note**:

@@ -134,6 +134,12 @@ export interface PeopleStore {
   getInteraction(id: string): Promise<Interaction | null>
   /** Removes the person and everything that hangs off them. */
   deletePerson(id: string): Promise<void>
+  /**
+   * Hands everything on one File to another person: identifiers, interactions, facts and tied
+   * thoughts. Safe to repeat. The caller settles clashing current facts first: the database
+   * allows one per key.
+   */
+  moveFile(fromId: string, toId: string): Promise<void>
   addExclusions(entries: ExclusionEntry[]): Promise<void>
   /** True if any entry is on the exclusion list (exact match). */
   anyExcluded(entries: ExclusionEntry[]): Promise<boolean>
@@ -220,6 +226,11 @@ export type GetPersonResult =
 export type ForgetPersonResult =
   | { status: 'confirmation_required'; person: Person }
   | { status: 'forgotten'; name: string }
+  | { status: 'not_found' }
+
+export type MergePeopleResult =
+  | { status: 'confirmation_required'; from: Person; into: Person; identifiers: Identifier[]; facts: Fact[] }
+  | { status: 'merged'; person: Person; moved: Identifier[] }
   | { status: 'not_found' }
 
 export interface RefreshProfileOptions {
@@ -323,6 +334,13 @@ export interface People {
   setFact(personId: string, key: string, value: string): Promise<SetFactResult>
   getPerson(input: GetPersonInput): Promise<GetPersonResult>
   forgetPerson(personId: string, opts: { confirm: boolean }): Promise<ForgetPersonResult>
+  /**
+   * Folds a duplicate File into the real one: everything on `fromId` moves to `intoId` and the
+   * duplicate is removed. Unlike forgetPerson it excludes nobody, so the moved identifiers keep
+   * matching the real Person. `intoId` keeps its own name, profile, relationship and follow-up
+   * and its current Facts. The Profile is not regenerated here.
+   */
+  mergePeople(fromId: string, intoId: string, opts: { confirm: boolean }): Promise<MergePeopleResult>
   refreshProfile(personId: string, opts: RefreshProfileOptions): Promise<RefreshProfileResult>
 }
 
@@ -823,6 +841,51 @@ export function createPeople(deps: PeopleDeps): People {
       await store.closeReviewItems('suggestion', person.id)
       await store.deletePerson(person.id)
       return { status: 'forgotten', name: person.name }
+    },
+
+    async mergePeople(fromId, intoId, opts) {
+      if (fromId === intoId) throw new Error('cannot merge a file into itself')
+      const from = await store.getPerson(fromId)
+      const into = await store.getPerson(intoId)
+      if (!from || !into) return { status: 'not_found' }
+      if (into.status !== 'active') {
+        throw new Error(`${into.name} is ${into.status}, not approved: approve them before merging into their file`)
+      }
+      const identifiers = await store.identifiersOf(from.id)
+      const facts = (await store.factsOf(from.id)).filter((f) => f.superseded_at === null)
+      if (!opts.confirm) return { status: 'confirmation_required', from, into, identifiers, facts }
+
+      // A current fact the real file already has wins; the duplicate's becomes history.
+      const kept = new Set((await store.factsOf(into.id)).filter((f) => f.superseded_at === null).map((f) => f.key))
+      for (const fact of facts) if (kept.has(fact.key)) await store.supersedeFact(fact.id, now().toISOString())
+
+      // The duplicate's name stays a way to find the Person, so a note written to it still lands.
+      if (from.name.trim().toLowerCase() !== into.name.trim().toLowerCase()) {
+        await store.addIdentifiers(into.id, [{ type: 'alias', value: from.name.trim().toLowerCase() }])
+      }
+      // Identifiers move before the delete, and the delete comes last: a failure part-way leaves
+      // the duplicate in place to merge again, and never loses the timeline to a cascade.
+      await store.moveFile(from.id, into.id)
+
+      const latest = [from.last_contact_at, into.last_contact_at].filter((t): t is string => !!t).sort().at(-1)
+      const person = await store.updatePerson(
+        into.id,
+        definedOnly({
+          last_contact_at: latest,
+          relationship: into.relationship ?? from.relationship ?? undefined,
+          follow_up_at: into.follow_up_at ?? from.follow_up_at ?? undefined,
+          follow_up_note: into.follow_up_note ?? from.follow_up_note ?? undefined,
+        }),
+      )
+
+      await store.closeReviewItems('suggestion', from.id)
+      for (const item of await store.openReviewItems()) {
+        if (item.kind === 'conflict' && item.detail.person_ids?.includes(from.id) && item.detail.person_ids.includes(into.id)) {
+          await store.closeReviewItems('conflict', item.key)
+        }
+      }
+      await store.deletePerson(from.id)
+      return { status: 'merged', person, moved: identifiers }
     },
 
     async refreshProfile(personId, opts) {
