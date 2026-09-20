@@ -4,3 +4,4 @@
 node_modules/
 supabase/.temp/
 .obsidian/
+.claude/skills/transcribe/.venv/
