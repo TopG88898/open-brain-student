@@ -387,12 +387,17 @@ async function addThought(content: string) {
 
 const optionalString = (v: unknown) => (typeof v === 'string' && v.trim() ? v : undefined)
 
+// Profiles keep each action with whoever did it, which the gateway's default model got wrong
+// on repeated runs (Ethan's requests written up as the contact's), so they ask for a stronger one.
+const PROFILE_MODEL = 'claude-sonnet-5'
+
 async function summarizeWithLLM(prompt: string): Promise<string> {
   const res = await fetch(`${SUPABASE_URL}/functions/v1/call-llm`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${SERVICE_ROLE_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       prompt,
+      model: PROFILE_MODEL,
       maxTokens: 500,
       systemPrompt: 'You write concise, factual profile summaries. Output only the summary text.',
     }),
