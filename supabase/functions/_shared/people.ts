@@ -412,8 +412,8 @@ function profilePrompt(
   const shown = interactions.filter((i) => clean(i.summary))
   return [
     `You maintain Ethan's private file on ${person.name}${person.relationship ? ` (${person.relationship})` : ''}. Ethan is the file's owner, and the interactions below are his exchanges with them.`,
-    `Write a profile summary of at most ${maxWords} words, in plain prose, using only the facts and interactions below. It is about ${person.name}, not about Ethan: say who ${person.name} is and how Ethan knows them, then what ${person.name} is doing or has said. Mention Ethan only where needed to explain the relationship.`,
-    `Attribute every action to the person the interaction names: what Ethan asked, offered, sent or arranged stays Ethan's, and what ${person.name} said or did stays ${person.name}'s.`,
+    `Write a profile summary of at most ${maxWords} words, in plain prose, using only the facts and interactions below. It is about ${person.name}, not about Ethan: say who ${person.name} is and how Ethan knows them, then what ${person.name} is doing or has said. Mention Ethan where needed to explain the relationship, or where an entry says something Ethan did.`,
+    `Attribute every action to the person the interaction names. An entry that says Ethan asked, offered, sent or arranged something is Ethan's: write "Ethan asked ${person.name} for ..." or leave it out, and never turn it into something ${person.name} asked or did. Say ${person.name} asked, offered, sent or said something only when the entry says ${person.name} did. If an entry does not say who acted, leave it out.`,
     'State only what the facts and interactions say. Do not speculate, interpret, or comment on their significance. Do not quote messages verbatim.',
     avoidTopics.length ? `Never mention: ${avoidTopics.join(', ')}.` : '',
     '',

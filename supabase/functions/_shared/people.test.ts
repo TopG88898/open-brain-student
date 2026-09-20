@@ -744,6 +744,23 @@ describe('refreshProfile', () => {
     assert.match(prompt, /Attribute every action/)
   })
 
+  it('lets an action of Ethan stay Ethan\'s in a profile about the person, and drops entries that do not say who acted', async () => {
+    const person = await someone('Test Person')
+    await people.addInteraction({ person_id: person.id, source: 'imessage', summary: 'Ethan asked Test Person for input on the launch plan.' })
+    let prompt = ''
+
+    await people.refreshProfile(person.id, {
+      summarize: async (p) => {
+        prompt = p
+        return 'Test Person is a friend.'
+      },
+    })
+
+    assert.match(prompt, /never turn it into something Test Person asked or did/)
+    assert.match(prompt, /does not say who acted, leave it out/)
+    assert.doesNotMatch(prompt, /Mention Ethan only where needed/)
+  })
+
   it('leaves out a fact that touches an avoided topic', async () => {
     const person = await someone('Test Person')
     await people.setFact(person.id, 'employer', 'Acme')
